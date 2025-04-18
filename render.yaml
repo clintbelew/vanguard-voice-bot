@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: vanguard-chiropractic-voice-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn run:app
+    envVars:
+      - key: TWILIO_ACCOUNT_SID
+        value: AC756bd7ddebaf9c05130af548a3506722
+      - key: TWILIO_AUTH_TOKEN
+        value: 53a39f1b4f694a9e6b8437ce1316fe28
+      - key: TWILIO_PHONE_NUMBER
+        value: +18305900834
+      - key: GHL_API_KEY
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVC9J.eyJsb2NhdGlvbl9pZCI6IlwiIiwvb1I6MSw
+      - key: GHL_LOCATION_ID
+        value: LcYKIYE6VYgMeZDuSBx9
+      - key: DEBUG
+        value: False
+      - key: PORT
+        value: 5000
+      - key: BUSINESS_NAME
+        value: Vanguard Chiropractic
+      - key: BUSINESS_PHONE
+        value: +18305900834
+      - key: BUSINESS_LOCATION
+        value: 123 Main Street, Anytown, CA 12345
