@@ -18,7 +18,7 @@ def index():
     """Home page route."""
     return "Twilio Voice Bot for Vanguard Chiropractic is running!"
 
-@main.route('/voice', methods=['POST'])
+@main.route('/voice', methods=['GET', 'POST'])
 def voice():
     """Handle incoming voice calls."""
     # Create TwiML response
