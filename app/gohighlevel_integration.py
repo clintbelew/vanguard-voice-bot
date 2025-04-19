@@ -2,6 +2,7 @@
 GoHighLevel integration module.
 This module handles all interactions with the GoHighLevel API.
 """
+
 import logging
 import requests
 import os
@@ -9,7 +10,164 @@ from config.config import ERROR_MESSAGES
 
 # GoHighLevel API credentials
 # These should be set in environment variables or a secure configuration
-API_KEY = os."""
+API_KEY = os.environ.get('GHL_API_KEY', '')
+LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '')
+CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
+
+# Base URL for GoHighLevel API
+BASE_URL = "https://rest.gohighlevel.com/v1"
+
+def is_configured():
+            """Check if GoHighLevel integration is properly configured."""
+            return bool(API_KEY and LOCATION_ID)
+
+def get_available_slots(date_str, service_id=None):
+            """
+                Get available appointment slots for a specific date.
+
+                        Args:
+                                date_str (str): Date in YYYY-MM-DD format
+                                        service_id (str, optional): Service ID to filter slots
+
+                                                    Returns:
+                                                            list: List of available time slots or empty list if error
+                                                                """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
+                            return []
+
+            try:
+                            if not CALENDAR_ID:
+                                                logging.error("Calendar ID not configured. Cannot get available slots.")
+                                                return []
+
+        url = f"{BASE_URL}/appointments/slots/{LOCATION_ID}/{CALENDAR_ID}"
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+        params = {"date": date_str}
+
+        if service_id:
+                            params["serviceId"] = service_id
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code == 200:
+                            return response.json().get('slots', [])
+else:
+                    logging.error(f"Failed to get available slots: {response.status_code} - {response.text}")
+                    return []
+except Exception as e:
+        logging.error(f"Error getting available slots: {str(e)}")
+        return []
+
+def create_contact(phone, first_name=None, last_name=None, email=None):
+            """
+                Create or update a contact in GoHighLevel.
+
+                        Args:
+                                phone (str): Contact's phone number
+                                        first_name (str, optional): Contact's first name
+                                                last_name (str, optional): Contact's last name
+                                                        email (str, optional): Contact's email
+
+                                                                    Returns:
+                                                                            dict: Contact data or None if error
+                                                                                """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot create contact.")
+                            return None
+
+            try:
+                            url = f"{BASE_URL}/contacts/lookup"
+                            headers = {"Authorization": f"Bearer {API_KEY}"}
+                            params = {"phone": phone}
+
+        # Check if contact exists
+                response = requests.get(url, headers=headers, params=params)
+
+        contact_data = {
+                            "phone": phone,
+                            "locationId": LOCATION_ID
+        }
+
+        if first_name:
+                            contact_data["firstName"] = first_name
+                        if last_name:
+                                            contact_data["lastName"] = last_name
+                                        if email:
+                                                            contact_data["email"] = email
+
+        # If contact exists, update it
+        if response.status_code == 200 and response.json().get('contacts'):
+                            contact_id = response.json()['contacts'][0]['id']
+                            url = f"{BASE_URL}/contacts/{contact_id}"
+                            response = requests.put(url, headers=headers, json=contact_data)
+else:
+                    # Create new contact
+                    url = f"{BASE_URL}/contacts"
+                    response = requests.post(url, headers=headers, json=contact_data)
+
+        if response.status_code in [200, 201]:
+                            return response.json()
+else:
+                    logging.error(f"Failed to create/update contact: {response.status_code} - {response.text}")
+                    return None
+except Exception as e:
+        logging.error(f"Error creating/updating contact: {str(e)}")
+        return None
+
+def book_appointment(contact_id, date_str, time_str, service_id=None, notes=None):
+            """
+                Book an appointment in GoHighLevel.
+
+                        Args:
+                                contact_id (str): Contact ID
+                                        date_str (str): Date in YYYY-MM-DD format
+                                                time_str (str): Time in HH:MM format
+                                                        service_id (str, optional): Service ID
+                                                                notes (str, optional): Appointment notes
+
+                                                                            Returns:
+                                                                                    dict: Appointment data or None if error
+                                                                                        """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
+                            return None
+
+            try:
+                            if not CALENDAR_ID:
+                                                logging.error("Calendar ID not configured. Cannot book appointment.")
+                                                return None
+
+        url = f"{BASE_URL}/appointments/calendar/{CALENDAR_ID}"
+        headers = {"Authorization": f"Bearer {API_KEY}"}
+
+        appointment_data = {
+                            "contactId": contact_id,
+                            "calendarId": CALENDAR_ID,
+                            "dateTime": f"{date_str} {time_str}",
+                            "locationId": LOCATION_ID
+        }
+
+        if service_id:
+                            appointment_data["serviceId"] = service_id
+                        if notes:
+                                            appointment_data["notes"] = notes
+
+        response = requests.post(url, headers=headers, json=appointment_data)
+
+        if response.status_code == 200:
+                            return response.json()
+else:
+                    logging.error(f"Failed to book appointment: {response.status_code} - {response.text}")
+                    return None
+except Exception as e:
+        logging.error(f"Error booking appointment: {str(e)}")
+        return None
+
+def add_tag_to_contact(contact_id, tag_name):
+            """
+                Add a tag to a contact in GoHighLevel.
+""""""
 GoHighLevel integration module.
 This module handles all interactions with the GoHighLevel API.
 """
@@ -29,299 +187,231 @@ CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
 BASE_URL = "https://rest.gohighlevel.com/v1"
 
 def is_configured():
-        """Check if GoHighLevel integration is properly configured."""
-        return bool(API_KEY and LOCATION_ID)
-    
-def create_contact(contact_data):
-        """Create a new contact in GoHighLevel."""
-        try:
-                    if not is_configured():
-                                    logging.warning("GoHighLevel integration not configured. Using dummy contact ID.")
-                                    return "contact_123"  # Return a dummy contact ID
-                                
-                    # Log the contact creation attempt
-        logging.info(f"Creating contact in GoHighLevel: {contact_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/contacts/"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.post(url, json=contact_data, headers=headers)
-        # if response.status_code == 200:
-        #     return response.json().get('id')
-        
-        # For now, return a dummy contact ID
-        return "contact_123"
-except Exception as e:
-        logging.error(f"Error creating contact in GoHighLevel: {str(e)}")
-        return "contact_error"
+            """Check if GoHighLevel integration is properly configured."""
+            return bool(API_KEY and LOCATION_ID)
 
-def update_contact(contact_id, contact_data):
-        """Update an existing contact in GoHighLevel."""
-        try:
-                    if not is_configured():
-                                    logging.warning("GoHighLevel integration not configured. Using dummy success response.")
-                                    return True
-                                
-                    # Log the contact update attempt
-        logging.info(f"Updating contact in GoHighLevel: {contact_id} with data: {contact_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/contacts/{contact_id}"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.put(url, json=contact_data, headers=headers)
-        # return response.status_code == 200
-        
-        # For now, return success
-        return True
-except Exception as e:
-        logging.error(f"Error updating contact in GoHighLevel: {str(e)}")
-        return False
+def get_available_slots(date_str, service_id=None):
+            """
+                Get available appointment slots for a specific date.
 
-def add_tag_to_contact(contact_id, tag_name):
-        """Add a tag to a contact in GoHighLevel."""
-        try:
-                    if not is_configured():
-                                    logging.warning("GoHighLevel integration not configured. Using dummy success response.")
-                                    return True
-                                
-                    # Log the tag addition attempt
-        logging.info(f"Adding tag '{tag_name}' to contact {contact_id} in GoHighLevel")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/contacts/{contact_id}/tags"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.post(url, json={"tags": [tag_name]}, headers=headers)
-        # return response.status_code == 200
-        
-        # For now, return success
-        return True
-except Exception as e:
-        logging.error(f"Error adding tag to contact in GoHighLevel: {str(e)}")
-        return False
+                        Args:
+                                date_str (str): Date in YYYY-MM-DD format
+                                        service_id (str, optional): Service ID to filter slots
 
-def get_available_appointment_slots(date_str):
-        """Get available appointment slots for a given date."""
-        try:
-                    if not is_configured() or not CALENDAR_ID:
-                                    logging.warning("GoHighLevel calendar integration not configured. Using dummy appointment slots.")
-                                    # Return environ.get('GOHIGHLEVEL_API_KEY', '')
-LOCATION_ID = os.environ.get('GOHIGHLEVEL_LOCATION_ID', '')
-CALENDAR_ID = os.environ.get('GOHIGHLEVEL_CALENDAR_ID', '')
+                                                    Returns:
+                                                            list: List of available time slots or empty list if error
+                                                                """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
+                            return []
+
+    try:
+                    if not CALENDAR_ID:
+                                        logging.error("Calendar ID not configured. Cannot get available slots.")
+                                        return []
+
+        # Return dummy data for testing when real API is not available
+        return ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
+except Exception as e:
+        logging.error(f"Error getting available slots: {str(e)}")
+        return []
+
+def create_contact(phone, first_name=None, last_name=None, email=None):
+            """
+                Create or update a contact in GoHighLevel.
+
+                        Args:
+                                phone (str): Contact's phone number
+                                        first_name (str, optional): Contact's first name
+                                                last_name (str, optional): Contact's last name
+                                                        email (str, optional): Contact's email
+
+                                                                    Returns:
+                                                                            dict: Contact data or None if error
+                                                                                """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot create contact.")
+                            return None
+
+    try:
+                    # Return dummy data for testing when real API is not available
+                    return {"id": "dummy_contact_id", "phone": phone, "firstName": first_name, "lastName": last_name}
+    except Exception as e:
+                    logging.error(f"Error creating/updating contact: {str(e)}")
+                    return None
+
+def book_appointment(contact_id, date_str, time_str, service_id=None, notes=None):
+            ""d"e"f" 
+            aGdodH_itgahgL_etvoe_lc oinnttaecgtr(actoinotna cmto_diudl,e .t
+            aTgh_insa mmeo)d:u
+            l e   h a"n"d"l
+            e s   a lAld di nat etraagc ttioo nas  cwointtha ctth ei nG oGHoiHgihgLheLveevle lA.P
+            I . 
+             " "
+             " 
+              
+               i mAprogrst: 
+               l o g g i n g 
+                icmopnotratc tr_eiqdu e(ssttsr
+                )i:m pCoorntt aocst
+                 fIrDo
+                 m   c o n f i g .tcaogn_fniagm ei m(psotrrt) :E RTRaOgR _nMaEmSeS AtGoE Sa
+                 d
+                 d#
+                   G o H i g h L e
+                   v e l   ARPeIt ucrrnesd:e
+                   n t i a l s 
+                    A PbIo_oKlE:Y  T=r uoes .iefn vsiurcocne.sgseftu(l',G HFLa_lAsPeI _oKtEhYe'r,w i's'e)
+                    
+                     L O C A"T"I"O
+                     N _ I D  i=f  onso.te nivsi_rcoonn.fgiegtu(r'eGdH(L)_:L
+                     O C A T I O N _ IlDo'g,g i'n'g).
+                     wCaArLnEiNnDgA(R"_GIoDH i=g hoLse.veenlv iirnotne.ggreatt(i'oGnH Ln_oCtA LcEoNnDfAiRg_uIrDe'd,.  'C'a)n
+                     n
+                     o#t  Baadsde  tUaRgL  tfoo rc oGnotHaicgth.L"e)v
+                     e l   A P I 
+                      B ArSeEt_uUrRnL  F=a l"shetdef create_contact(phone, first_name=None, last_name=None, email=None):
+                          """Create or update a contact in GoHighLevel."""
+                              if not is_configured():
+                                      logging.warning("GoHighLevel integration not configured. Cannot create contact.")
+                                              return None
+
+                                                      try:
+                                                              # Return dummy data for testing
+                                                                      return {"id": "dummy_contact_id", "phone": phone, "firstName": first_name, "lastName": last_name}
+                                                                          except Exception as e:
+                                                                                  logging.error(f"Error creating/updating contact: {str(e)}")
+                                                                                          return None
+
+                                                                                          def book_appointment(contact_id, date_str, time_str, service_id=None, notes=None):
+                                                                                              """Book an appointment in GoHighLevel."""
+                                                                                                  if not is_configured():
+                                                                                                          logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
+                                                                                                                  return None
+                                                                                                                      
+                                                                                                                          try:
+                                                                                                                                  if not CALENDAR_ID:
+                                                                                                                                              logging.error("Calendar ID not configured. Cannot book appointment.")
+                                                                                                                                                          return None
+                                                                                                                                                                      
+                                                                                                                                                                              # Return dummy data for testing
+                                                                                                                                                                                      return {"id": "dummy_appointment_id", "contactId": contact_id, "dateTime": f"{date_str} {time_str}"}
+                                                                                                                                                                                          except Exception as e:
+                                                                                                                                                                                                  logging.error(f"Error booking appointment: {str(e)}")
+                                                                                                                                                                                                          return None
+                                                                                                                                                                                                          
+                                                                                                                                                                                                          def add_tag_to_contact(contact_id, tag_name):
+                                                                                                                                                                                                              """Add a tag to a contact in GoHighLevel."""
+                                                                                                                                                                                                                  if not is_configured():
+                                                                                                                                                                                                                          logging.warning("GoHighLevel integration not configured. Cannot add tag to contact.")
+                                                                                                                                                                                                                                  return False
+                                                                                                                                                                                                                                      
+                                                                                                                                                                                                                                          try:
+                                                                                                                                                                                                                                                  # Return dummy result for testing
+                                                                                                                                                                                                                                                          return True
+                                                                                                                                                                                                                                                              except Exception as e:
+                                                                                                                                                                                                                                                                      logging.error(f"Error adding tag to contact: {str(e)}")
+                                                                                                                                                                                                                                                                              return False
+                      t p s : /
+                      / r e s tt.rgyo:h
+                      i g h l e v e l .#c oRme/tvu1r"n
+                       
+                       dduemfm yi sr_ecsounlfti gfuorre dt(e)s:t
+                       i n g   w"h"e"nC hreecakl  iAfP IG oiHsi gnhoLte vaevla iilnatbelger
+                       a t i o n   i s  rpertouprenr lTyr uceo
+                       n f i g uerxecde.p"t" "E
+                       x c e p trieotnu rans  beo:o
+                       l ( A P I _ K E Yl oagngdi nLgO.CeArTrIoOrN(_fI"DE)r
+                       r
+                       odre fa dgdeitn_ga vtaaigl atbol ec_osnltoatcst(:d a{tset_rs(ter),} "s)e
+                       r v i c e _ i d =rNeotnuer)n: 
+                       F a l s e"""Get available appointment slots for a specific date."""
+                           if not is_configured():
+                                   logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
+                                           return []
+                                               
+                                                   try:
+                                                           if not CALENDAR_ID:
+                                                                       logging.error("Calendar ID not configured. Cannot get available slots.")
+                                                                                   return []
+                                                                                               
+                                                                                                       # Return dummy data for testing
+                                                                                                               return ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
+                                                                                                                   except Exception as e:
+                                                                                                                           logging.error(f"Error getting available slots: {str(e)}")
+                                                                                                                                   return []"
+                Book an appointment in GoHighLevel.
+
+                        Args:
+                                contact_id (str): Contact ID
+                                        date_str (str): Date in YYYY-MM-DD format
+                                                time_str (str): Time in HH:MM format
+                                                        service_id (str, optional): Service ID
+                                                                notes (str, optional): Appointment notes
+
+                                                                            Returns:
+                                                                                    dict: Appointment data or None if error
+                                                                                        """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
+                            return None
+
+    try:
+                    if not CALENDAR_ID:
+                                        logging.error("Calendar ID not configured. Cannot book appointment.")
+                                        return None
+
+        # Return dummy data for testing when real API is not available
+        return {"id": "dummy_appointment_id", "contactId": contact_id, "dateTime": f"{date_str} {time_str}"}
+except Exception as e:
+        logging.error(f"Error booking appointment: {str(e)}")
+        return None
+
+
+        GoHighLevel integration module.
+                This module handles all interactions with the GoHighLevel API.
+                """
+
+                import logging
+                import requests
+import os
+from config.config import ERROR_MESSAGES
+
+# GoHighLevel API credentials
+# These should be set in environment variables or a secure configuration
+API_KEY = os.environ.get('GHL_API_KEY', '')
+LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '')
+CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
 
 # Base URL for GoHighLevel API
 BASE_URL = "https://rest.gohighlevel.com/v1"
+                        Args:
+                                contact_id (str): Contact ID
+                                        tag_name (str): Tag name to add
 
-def is_configured():
-    """Check if GoHighLevel integration is properly configured."""
-    return bool(API_KEY and LOCATION_ID)
+                                                    Returns:
+                                                            bool: True if successful, False otherwise
+                                                                """
+            if not is_configured():
+                            logging.warning("GoHighLevel integration not configured. Cannot add tag to contact.")
+                            return False
 
-def create_contact(contact_data):
-    """Create a new contact in GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Using dummy contact ID.")
-            return "contact_123"  # Return a dummy contact ID
-            
-        # Log the contact creation attempt
-        logging.info(f"Creating contact in GoHighLevel: {contact_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/contacts/"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.post(url, json=contact_data, headers=headers)
-        # response.raise_for_status()
-        # return response.json().get('id')
-        
-        # For now, return a dummy contact ID
-        return "contact_123"
-    except Exception as e:
-        logging.error(f"Error creating contact in GoHighLevel: {str(e)}")
-        return None
+            try:
+                            url = f"{BASE_URL}/contacts/{contact_id}/tags"
+                            headers = {"Authorization": f"Bearer {API_KEY}"}
 
-def update_contact(contact_data):
-    """Update an existing contact in GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Contact update simulated.")
-            return True
-            
-        # Log the contact update attempt
-        logging.info(f"Updating contact in GoHighLevel: {contact_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # contact_id = contact_data.get('id')
-        # url = f"{BASE_URL}/contacts/{contact_id}"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.put(url, json=contact_data, headers=headers)
-        # response.raise_for_status()
-        # return response.status_code == 200
-        
-        # For now, return success
-        return True
-    except Exception as e:
-        logging.error(f"Error updating contact in GoHighLevel: {str(e)}")
-        return False
-
-def create_appointment(appointment_data):
-    """Create a new appointment in GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Using dummy appointment ID.")
-            return "appointment_123"  # Return a dummy appointment ID
-            
-        if not CALENDAR_ID:
-            logging.error("Calendar ID not configured. Cannot create appointment.")
-            return None
-            
-        # Log the appointment creation attempt
-        logging.info(f"Creating appointment in GoHighLevel: {appointment_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.post(url, json=appointment_data, headers=headers)
-        # response.raise_for_status()
-        # return response.json().get('id')
-        
-        # For now, return a dummy appointment ID
-        return "appointment_123"
-    except Exception as e:
-        logging.error(f"Error creating appointment in GoHighLevel: {str(e)}")
-        return None
-
-def update_appointment(appointment_id, appointment_data):
-    """Update an existing appointment in GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Appointment update simulated.")
-            return True
-            
-        if not CALENDAR_ID:
-            logging.error("Calendar ID not configured. Cannot update appointment.")
-            return False
-            
-        # Log the appointment update attempt
-        logging.info(f"Updating appointment {appointment_id} in GoHighLevel: {appointment_data}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments/{appointment_id}"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.put(url, json=appointment_data, headers=headers)
-        # response.raise_for_status()
-        # return response.status_code == 200
-        
-        # For now, return success
-        return True
-    except Exception as e:
-        logging.error(f"Error updating appointment in GoHighLevel: {str(e)}")
-        return False
-
-def get_appointment(appointment_id):
-    """Get appointment details from GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Using dummy appointment data.")
-            # Return dummy appointment data
-            return {
-                "id": appointment_id,
-                "date": "2025-04-25",
-                "time": "10:00 AM",
-                "status": "scheduled"
-            }
-            
-        if not CALENDAR_ID:
-            logging.error("Calendar ID not configured. Cannot get appointment.")
-            return None
-            
-        # Log the appointment retrieval attempt
-        logging.info(f"Getting appointment {appointment_id} from GoHighLevel")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments/{appointment_id}"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.get(url, headers=headers)
-        # response.raise_for_status()
-        # return response.json()
-        
-        # For now, return dummy appointment data
-        return {
-            "id": appointment_id,
-            "date": "2025-04-25",
-            "time": "10:00 AM",
-            "status": "scheduled"
+        tag_data = {
+                            "tags": [tag_name],
+                            "locationId": LOCATION_ID
         }
-    except Exception as e:
-        logging.error(f"Error getting appointment from GoHighLevel: {str(e)}")
-        return None
 
-def tag_contact(contact_id, tag):
-    """Add a tag to a contact in GoHighLevel."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Contact tagging simulated.")
-            return True
-            
-        # Log the contact tagging attempt
-        logging.info(f"Tagging contact {contact_id} with: {tag}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/contacts/{contact_id}/tags"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # response = requests.post(url, json={"tags": [tag]}, headers=headers)
-        # response.raise_for_status()
-        # return response.status_code == 200
-        
-        # For now, return success
-        return True
-    except Exception as e:
-        logging.error(f"Error tagging contact in GoHighLevel: {str(e)}")
+        response = requests.post(url, headers=headers, json=tag_data)
+
+        if response.status_code == 200:
+                            return True
+else:
+                    logging.error(f"Failed to add tag to contact: {response.status_code} - {response.text}")
+                    return False
+except Exception as e:
+        logging.error(f"Error adding tag to contact: {str(e)}")
         return False
-
-def get_available_slots(date=None):
-    """Get available appointment slots from GoHighLevel calendar."""
-    try:
-        if not is_configured():
-            logging.warning("GoHighLevel integration not configured. Using dummy available slots.")
-            # Return dummy available slots
-            return [
-                {"date": "2025-04-20", "time": "10:00 AM"},
-                {"date": "2025-04-20", "time": "2:00 PM"},
-                {"date": "2025-04-21", "time": "11:00 AM"},
-                {"date": "2025-04-22", "time": "3:00 PM"}
-            ]
-            
-        if not CALENDAR_ID:
-            logging.error("Calendar ID not configured. Cannot get available slots.")
-            return []
-            
-        # Log the available slots retrieval attempt
-        logging.info(f"Getting available slots from GoHighLevel calendar for date: {date}")
-        
-        # In a real implementation, this would call the GoHighLevel API
-        # Example API call:
-        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/available-slots"
-        # headers = {"Authorization": f"Bearer {API_KEY}"}
-        # params = {"date": date} if date else {}
-        # response = requests.get(url, headers=headers, params=params)
-        # response.raise_for_status()
-        # return response.json().get('slots', [])
-        
-        # For now, return dummy available slots
-        return [
-            {"date": "2025-04-20", "time": "10:00 AM"},
-            {"date": "2025-04-20", "time": "2:00 PM"},
-            {"date": "2025-04-21", "time": "11:00 AM"},
-            {"date": "2025-04-22", "time": "3:00 PM"}
-        ]
-    except Exception as e:
-        logging.error(f"Error getting available slots from GoHighLevel: {str(e)}")
-        return []
