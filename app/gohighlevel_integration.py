@@ -9,7 +9,105 @@ from config.config import ERROR_MESSAGES
 
 # GoHighLevel API credentials
 # These should be set in environment variables or a secure configuration
-API_KEY = os.environ.get('GOHIGHLEVEL_API_KEY', '')
+API_KEY = os."""
+GoHighLevel integration module.
+This module handles all interactions with the GoHighLevel API.
+"""
+
+import logging
+import requests
+import os
+from config.config import ERROR_MESSAGES
+
+# GoHighLevel API credentials
+# These should be set in environment variables or a secure configuration
+API_KEY = os.environ.get('GHL_API_KEY', '')
+LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '')
+CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
+
+# Base URL for GoHighLevel API
+BASE_URL = "https://rest.gohighlevel.com/v1"
+
+def is_configured():
+        """Check if GoHighLevel integration is properly configured."""
+        return bool(API_KEY and LOCATION_ID)
+    
+def create_contact(contact_data):
+        """Create a new contact in GoHighLevel."""
+        try:
+                    if not is_configured():
+                                    logging.warning("GoHighLevel integration not configured. Using dummy contact ID.")
+                                    return "contact_123"  # Return a dummy contact ID
+                                
+                    # Log the contact creation attempt
+        logging.info(f"Creating contact in GoHighLevel: {contact_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/contacts/"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.post(url, json=contact_data, headers=headers)
+        # if response.status_code == 200:
+        #     return response.json().get('id')
+        
+        # For now, return a dummy contact ID
+        return "contact_123"
+except Exception as e:
+        logging.error(f"Error creating contact in GoHighLevel: {str(e)}")
+        return "contact_error"
+
+def update_contact(contact_id, contact_data):
+        """Update an existing contact in GoHighLevel."""
+        try:
+                    if not is_configured():
+                                    logging.warning("GoHighLevel integration not configured. Using dummy success response.")
+                                    return True
+                                
+                    # Log the contact update attempt
+        logging.info(f"Updating contact in GoHighLevel: {contact_id} with data: {contact_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/contacts/{contact_id}"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.put(url, json=contact_data, headers=headers)
+        # return response.status_code == 200
+        
+        # For now, return success
+        return True
+except Exception as e:
+        logging.error(f"Error updating contact in GoHighLevel: {str(e)}")
+        return False
+
+def add_tag_to_contact(contact_id, tag_name):
+        """Add a tag to a contact in GoHighLevel."""
+        try:
+                    if not is_configured():
+                                    logging.warning("GoHighLevel integration not configured. Using dummy success response.")
+                                    return True
+                                
+                    # Log the tag addition attempt
+        logging.info(f"Adding tag '{tag_name}' to contact {contact_id} in GoHighLevel")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/contacts/{contact_id}/tags"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.post(url, json={"tags": [tag_name]}, headers=headers)
+        # return response.status_code == 200
+        
+        # For now, return success
+        return True
+except Exception as e:
+        logging.error(f"Error adding tag to contact in GoHighLevel: {str(e)}")
+        return False
+
+def get_available_appointment_slots(date_str):
+        """Get available appointment slots for a given date."""
+        try:
+                    if not is_configured() or not CALENDAR_ID:
+                                    logging.warning("GoHighLevel calendar integration not configured. Using dummy appointment slots.")
+                                    # Return environ.get('GOHIGHLEVEL_API_KEY', '')
 LOCATION_ID = os.environ.get('GOHIGHLEVEL_LOCATION_ID', '')
 CALENDAR_ID = os.environ.get('GOHIGHLEVEL_CALENDAR_ID', '')
 
