@@ -1,8 +1,7 @@
-""" 
+"""
 GoHighLevel integration module.
 This module handles all interactions with the GoHighLevel API.
 """
-
 import logging
 import requests
 import os
@@ -18,246 +17,243 @@ CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
 BASE_URL = "https://rest.gohighlevel.com/v1"
 
 def is_configured():
-      """Check if GoHighLevel integration is properly configured."""
-      return bool(API_KEY and LOCATION_ID)
+    """Check if GoHighLevel integration is properly configured."""
+    return bool(API_KEY and LOCATION_ID)
 
-def get_available_slots(date_str, service_id=None):
-      """
-          Get available appointment slots for a specific date.
-
-                  Args:
-                          date_str (str): Date in YYYY-MM-DD format
-                                  service_id (str, optional): Service ID to filter slots
-
-                                              Returns:
-                                                      list: List of available time slots or empty list if error
-                                                          """
-      if not is_configured():
-                logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
-                return []
-
+def get_available_slots(date_str=None, service_id=None):
+    """
+    Get available appointment slots for a specific date.
+    
+    Args:
+        date_str (str, optional): Date in YYYY-MM-DD format
+        service_id (str, optional): Service ID to filter slots
+        
+    Returns:
+        list: List of available time slots or empty list if error
+    """
+    if not is_configured():
+        logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
+        return []
+    
     try:
-              if not CALENDAR_ID:
-                            logging.error("Calendar ID not configured. Cannot get available slots.")
-                            return []
-
+        if not CALENDAR_ID:
+            logging.error("Calendar ID not configured. Cannot get available slots.")
+            return []
+            
         # Return dummy data for testing when real API is not available
-              return ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
-except Exception as e:
-          logging.error(f"Error getting available slots: {str(e)}")
-          return []
+        return [
+            {"date": "2025-04-20", "time": "10:00 AM"},
+            {"date": "2025-04-20", "time": "2:00 PM"},
+            {"date": "2025-04-21", "time": "11:00 AM"},
+            {"date": "2025-04-22", "time": "3:00 PM"}
+        ]
+    except Exception as e:
+        logging.error(f"Error getting available slots: {str(e)}")
+        return []
 
-def create_contact(phone, first_name=None, last_name=None, email=None):
-      """
-          Create or update a contact in GoHighLevel.
-
-                  Args:
-                          phone (str): Contact's phone number
-                                  first_name (str, optional): Contact's first name
-                                          last_name (str, optional): Contact's last name
-                                                  email (str, optional): Contact's email
-
-                                                              Returns:
-                                                                      dict: Contact data or None if error
-                                                                          """
-      if not is_configured():
-                logging.warning("GoHighLevel integration not configured. Cannot create contact.")
-                return None
-
+def create_contact(contact_data):
+    """Create a new contact in GoHighLevel."""
     try:
-              # Return dummy data for testing
-              return {
-                            "id": "dummy-contact-id",
-                            "phone": phone,
-                            "firstName": first_name or "Test",
-                            "lastName": last_name or "User",
-                            "email": email or "test@example.com"
-              }
-except Exception as e:
-          logging.error(f"Error creating/updating contact: {str(e)}")
-          return None
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Using dummy contact ID.")
+            return "contact_123"  # Return a dummy contact ID
+            
+        # Log the contact creation attempt
+        logging.info(f"Creating contact in GoHighLevel: {contact_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/contacts/"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.post(url, json=contact_data, headers=headers)
+        # response.raise_for_status()
+        # return response.json().get('id')
+        
+        # For now, return a dummy contact ID
+        return "contact_123"
+    except Exception as e:
+        logging.error(f"Error creating contact in GoHighLevel: {str(e)}")
+        return None
+
+def update_contact(contact_data):
+    """Update an existing contact in GoHighLevel."""
+    try:
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Contact update simulated.")
+            return True
+            
+        # Log the contact update attempt
+        logging.info(f"Updating contact in GoHighLevel: {contact_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # contact_id = contact_data.get('id')
+        # url = f"{BASE_URL}/contacts/{contact_id}"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.put(url, json=contact_data, headers=headers)
+        # response.raise_for_status()
+        # return response.status_code == 200
+        
+        # For now, return success
+        return True
+    except Exception as e:
+        logging.error(f"Error updating contact in GoHighLevel: {str(e)}")
+        return False
+
+def create_appointment(appointment_data):
+    """Create a new appointment in GoHighLevel."""
+    try:
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Using dummy appointment ID.")
+            return "appointment_123"  # Return a dummy appointment ID
+            
+        if not CALENDAR_ID:
+            logging.error("Calendar ID not configured. Cannot create appointment.")
+            return None
+            
+        # Log the appointment creation attempt
+        logging.info(f"Creating appointment in GoHighLevel: {appointment_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.post(url, json=appointment_data, headers=headers)
+        # response.raise_for_status()
+        # return response.json().get('id')
+        
+        # For now, return a dummy appointment ID
+        return "appointment_123"
+    except Exception as e:
+        logging.error(f"Error creating appointment in GoHighLevel: {str(e)}")
+        return None
+
+def update_appointment(appointment_id, appointment_data):
+    """Update an existing appointment in GoHighLevel."""
+    try:
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Appointment update simulated.")
+            return True
+            
+        if not CALENDAR_ID:
+            logging.error("Calendar ID not configured. Cannot update appointment.")
+            return False
+            
+        # Log the appointment update attempt
+        logging.info(f"Updating appointment {appointment_id} in GoHighLevel: {appointment_data}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments/{appointment_id}"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.put(url, json=appointment_data, headers=headers)
+        # response.raise_for_status()
+        # return response.status_code == 200
+        
+        # For now, return success
+        return True
+    except Exception as e:
+        logging.error(f"Error updating appointment in GoHighLevel: {str(e)}")
+        return False
+
+def get_appointment(appointment_id):
+    """Get appointment details from GoHighLevel."""
+    try:
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Using dummy appointment data.")
+            # Return dummy appointment data
+            return {
+                "id": appointment_id,
+                "date": "2025-04-25",
+                "time": "10:00 AM",
+                "status": "scheduled"
+            }
+            
+        if not CALENDAR_ID:
+            logging.error("Calendar ID not configured. Cannot get appointment.")
+            return None
+            
+        # Log the appointment retrieval attempt
+        logging.info(f"Getting appointment {appointment_id} from GoHighLevel")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/appointments/calendars/{CALENDAR_ID}/appointments/{appointment_id}"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.get(url, headers=headers)
+        # response.raise_for_status()
+        # return response.json()
+        
+        # For now, return dummy appointment data
+        return {
+            "id": appointment_id,
+            "date": "2025-04-25",
+            "time": "10:00 AM",
+            "status": "scheduled"
+        }
+    except Exception as e:
+        logging.error(f"Error getting appointment from GoHighLevel: {str(e)}")
+        return None
+
+def tag_contact(contact_id, tag):
+    """Add a tag to a contact in GoHighLevel."""
+    try:
+        if not is_configured():
+            logging.warning("GoHighLevel integration not configured. Contact tagging simulated.")
+            return True
+            
+        # Log the contact tagging attempt
+        logging.info(f"Tagging contact {contact_id} with: {tag}")
+        
+        # In a real implementation, this would call the GoHighLevel API
+        # Example API call:
+        # url = f"{BASE_URL}/contacts/{contact_id}/tags"
+        # headers = {"Authorization": f"Bearer {API_KEY}"}
+        # response = requests.post(url, json={"tags": [tag]}, headers=headers)
+        # response.raise_for_status()
+        # return response.status_code == 200
+        
+        # For now, return success
+        return True
+    except Exception as e:
+        logging.error(f"Error tagging contact in GoHighLevel: {str(e)}")
+        return False
 
 def book_appointment(contact_id, date_str, time_str, service_id=None, notes=None):
-      """
-          Book an appointment in GoHighLevel.
-
-                  Args:
-                          contact_id (str): Contact ID
-                                  date_str (str): Date in YYYY-MM-DD format
-                                          time_str (str): Time in HH:MM format
-                                                  service_id (str, optional): Service ID
-                                                          notes (str, optional): Appointment notes
-
-                                                                      Returns:
-                                                                              dict: Appointment data or None if error
-                                                                                  """
-      if not is_configured():
-                logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
-                return None
-
+    """
+    Book an appointment in GoHighLevel.
+    
+    Args:
+        contact_id (str): Contact ID
+        date_str (str): Date in YYYY-MM-DD format
+        time_str (str): Time in HH:MM format
+        service_id (str, optional): Service ID
+        notes (str, optional): Appointment notes
+        
+    Returns:
+        dict: Appointment data or None if error
+    """
+    if not is_configured():
+        logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
+        return None
+        
     try:
-              if not CALENDAR_ID:
-                            logging.error("Calendar ID not configured. Cannot book appointment.")
-                            return None
-
+        if not CALENDAR_ID:
+            logging.error("Calendar ID not configured. Cannot book appointment.")
+            return None
+            
         # Return dummy data for testing
-              return {
-                            "id": "dummy-appointment-id","""
-                            GoHighLevel integration module.
-                            This module handles all interactions with the GoHighLevel API.
-                            """
-
-                import logging
-                # Base URL for GoHighLevel API
-                BASE_URL = "https://rest.gohighlevel.com/v1"
-
-                def is_configured():
-                    """Check if GoHighLevel integration is properly configured."""
-                        return bool(API_KEY and LOCATION_ID)
-
-                        def get_available_slots(date_str, service_id=None):
-                            """
-                                Get available appointment slots for a specific date.
-
-                                        Args:
-                                                date_str (str): Date in YYYY-MM-DD format
-                                                def create_contact(phone, first_name=None, last_name=None, email=None):
-                                                    """
-                                                        Create or update a contact in GoHighLevel.
-
-                                                                Args:
-                                                                        phone (str): Contact's phone number
-                                                                                first_name (str, optional): Contact's first name
-                                                                                        last_name (str, optional): Contact's last name
-                                                                                                email (str, optional): Contact's email
-                                                                                                        
-                                                                                                            Returns:
-                                                                                                                    dict: Contact data or None if error
-                                                                                                                        """
-                                                                                                                            if not is_configured():
-                                                                                                                                    logging.warning("GoHighLevel integration not configured. Cannot create codef book_appointment(contact_id, date_str, time_str, service_id=None, notes=None):
-                                                                                                                                        """
-                                                                                                                                            Book an appointment in GoHighLevel.
-                                                                                                                                                
-                                                                                                                                                    Args:
-                                                                                                                                                            contact_id (str): Contact ID
-                                                                                                                                                                    date_str (str): Date in YYYY-MM-DD format
-                                                                                                                                                                            time_str (str): Time in HH:MM format
-                                                                                                                                                                                    service_id (str, optional): Service ID
-                                                                                                                                                                                            notes (str, optional): Appointment notes
-                                                                                                                                                                                                    
-                                                                                                                                                                                                        Returns:
-                                                                                                                                                                                                                dict: Appointment data or None if error
-                                                                                                                                                                                                                    """
-                                                                                                                                                                                                                        if not is_configured():
-                                                                                                                                                                                                                                logging.warning("GoHighLevel integration not configured. Cannot book appointment.")
-                                                                                                                                                                                                                                        return None
-                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                    try:
-                                                                                                                                                                                                                                                            if not CALENDAR_ID:
-                                                                                                                                                                                                                                                                        logging.error("Calendar ID not configured. Cannot book appointment.")
-                                                                                                                                                                                                                                                                                    return None
-                                                                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                        # Return dummy data for testdef add_tag_to_contact(contact_id, tag_name):
-                                                                                                                                                                                                                                                                                                            """
-                                                                                                                                                                                                                                                                                                                Add a tag to a contact in GoHighLevel.
-                                                                                                                                                                                                                                                                                                                    
-                                                                                                                                                                                                                                                                                                                        Args:
-                                                                                                                                                                                                                                                                                                                                contact_id (str): Contact ID
-                                                                                                                                                                                                                                                                                                                                        tag_name (str): Tag name to add
-                                                                                                                                                                                                                                                                                                                                                
-                                                                                                                                                                                                                                                                                                                                                    Returns:
-                                                                                                                                                                                                                                                                                                                                                            bool: True if successful, False otherwise
-                                                                                                                                                                                                                                                                                                                                                                """
-                                                                                                                                                                                                                                                                                                                                                                    if not is_configured():
-                                                                                                                                                                                                                                                                                                                                                                            logging.warning("GoHighLevel integration not configured. Cannot add tag to contact.")
-                                                                                                                                                                                                                                                                                                                                                                                    return False
-                                                                                                                                                                                                                                                                                                                                                                                            
-                                                                                                                                                                                                                                                                                                                                                                                                try:
-                                                                                                                                                                                                                                                                                                                                                                                                        # Return success for testing
-                                                                                                                                                                                                                                                                                                                                                                                                                logging.info(f"Added tag '{tag_name}' to contact {contact_id}")
-                                                                                                                                                                                                                                                                                                                                                                                                                        return True
-                                                                                                                                                                                                                                                                                                                                                                                                                            except Exception as e:
-                                                                                                                                                                                                                                                                                                                                                                                                                                    logging.error(f"Error adding tag to contact: {str(e)}")
-                                                                                                                                                                                                                                                                                                                                                                                                                                            return Falseing
-                                                                                                                                                                                                                                                                                                                return {
-                                                                                                                                                                                                                                                                                                                            "id": "dummy-appointment-id",
-                                                                                                                                                                                                                                                                                                                                        "contactId": contact_id,
-                                                                                                                                                                                                                                                                                                                                                    "dateTime": f"{date_str} {time_str}",
-                                                                                                                                                                                                                                                                                                                                                                "status": "confirmed"
-                                                                                                                                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                                                                                                                                                                            except Exception as e:
-                                                                                                                                                                                                                                                                                                                                                                                    logging.error(f"Error booking appointment: {str(e)}")
-                                                                                                                                                                                                                                                                                                                                                                                            return Nonentact.")
-                                                                                                                                            return None
-                                                                                                                                                    
-                                                                                                                                                        try:
-                                                                                                                                                                # Return dummy data for testing
-                                                                                                                                                                        return {
-                                                                                                                                                                                    "id": "dummy-contact-id",
-                                                                                                                                                                                                "phone": phone,
-                                                                                                                                                                                                            "firstName": first_name or "Test",
-                                                                                                                                                                                                                        "lastName": last_name or "User",
-                                                                                                                                                                                                                                    "email": email or "test@example.com"
-                                                                                                                                                                                                                                            }
-                                                                                                                                                                                                                                                except Exception as e:
-                                                                                                                                                                                                                                                        logging.error(f"Error creating/updating contact: {str(e)}")
-                                                                                                                                                                                                                                                                return None
-                                                        service_id (str, optional): Service ID to filter slots
-
-                                                                    Returns:
-                                                                            list: List of available time slots or empty list if error
-                                                                                """
-                                                                                    if not is_configured():
-                                                                                            logging.warning("GoHighLevel integration not configured. Cannot get available slots.")
-                                                                                                    return []
-                                                                                                            
-                                                                                                                try:
-                                                                                                                        if not CALENDAR_ID:
-                                                                                                                                    logging.error("Calendar ID not configured. Cannot get available slots.")
-                                                                                                                                                return []
-                                                                                                                                                            
-                                                                                                                                                                    # Return dummy data for testing when real API is not available
-                                                                                                                                                                            return ["9:00 AM", "10:00 AM", "11:00 AM", "1:00 PM", "2:00 PM", "3:00 PM"]
-                                                                                                                                                                                except Exception as e:
-                                                                                                                                                                                        logging.error(f"Error getting available slots: {str(e)}")
-                                                                                                                                                                                                return []
-                import requests
-                import os
-                from config.config import ERROR_MESSAGES
-
-                # GoHighLevel API credentials
-                # These should be set in environment variables or a secure configuration
-                API_KEY = os.environ.get('GHL_API_KEY', '')
-                LOCATION_ID = os.environ.get('GHL_LOCATION_ID', '')
-                CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', '')
-                            "contactId": contact_id,
-                            "dateTime": f"{date_str} {time_str}",
-                            "status": "confirmed"
-              }
-except Exception as e:
+        return {
+            "id": "dummy-appointment-id",
+            "contactId": contact_id,
+            "date": date_str,
+            "time": time_str,
+            "status": "confirmed"
+        }
+    except Exception as e:
         logging.error(f"Error booking appointment: {str(e)}")
         return None
 
 def add_tag_to_contact(contact_id, tag_name):
-      """
-          Add a tag to a contact in GoHighLevel.
-
-                  Args:
-                          contact_id (str): Contact ID
-                                  tag_name (str): Tag name to add
-
-                                              Returns:
-                                                      bool: True if successful, False otherwise
-                                                          """
-      if not is_configured():
-                logging.warning("GoHighLevel integration not configured. Cannot add tag to contact.")
-                return False
-
-    try:
-              # Return success for testing
-              logging.info(f"Added tag '{tag_name}' to contact {contact_id}")
-              return True
-except Exception as e:
-          logging.error(f"Error adding tag to contact: {str(e)}")
-          return False
+    """Alias for tag_contact for backward compatibility."""
+    return tag_contact(contact_id, tag_name)

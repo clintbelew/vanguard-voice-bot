@@ -9,9 +9,9 @@ TWILIO_AUTH_TOKEN = os.environ.get('TWILIO_AUTH_TOKEN', "")    # Add your Twilio
 TWILIO_PHONE_NUMBER = os.environ.get('TWILIO_PHONE_NUMBER', "") # Add your Twilio Phone Number here
 
 # GoHighLevel settings
-GOHIGHLEVEL_API_KEY = os.environ.get('GOHIGHLEVEL_API_KEY', "")
-GOHIGHLEVEL_LOCATION_ID = os.environ.get('GOHIGHLEVEL_LOCATION_ID', "")
-GOHIGHLEVEL_CALENDAR_ID = os.environ.get('GOHIGHLEVEL_CALENDAR_ID', "")
+GOHIGHLEVEL_API_KEY = os.environ.get('GHL_API_KEY', "")
+GOHIGHLEVEL_LOCATION_ID = os.environ.get('GHL_LOCATION_ID', "")
+GOHIGHLEVEL_CALENDAR_ID = os.environ.get('GHL_CALENDAR_ID', "")
 
 # Business information
 BUSINESS_NAME = "Vanguard Chiropractic"
