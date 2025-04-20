@@ -17,14 +17,14 @@ S3_GREETING_URL = "https://chirodesk-audio.s3.us-east-2.amazonaws.com/ElevenLabs
 # Helper function to create a TwiML response with background ambiance
 def create_response_with_ambiance():
     response = VoiceResponse()
-    response.play(BACKGROUND_AMBIANCE_URL, loop=0)
+    response.play(BACKGROUND_AMBIANCE_URL, loop=0, volume=0.1)
     return response
 
 # Enhanced say function that plays audio directly from S3
 def enhanced_say(response, text, voice="Rachel"):
-    # For now, we're using the S3 URL directly for the greeting
-    # In the future, this could be expanded to use more S3 URLs for common phrases
-    if text.lower() == "hello, thank you for calling vanguard chiropractic. how may i help you today?":
+    # Always use S3 URL for the greeting, regardless of exact text matching
+    if "thank you for calling vanguard chiropractic" in text.lower():
+        logger.info(f"Using S3 URL for greeting: {S3_GREETING_URL}")
         response.play(S3_GREETING_URL)
     else:
         # For other text, we'll use Twilio's Say verb as a fallback
@@ -33,17 +33,19 @@ def enhanced_say(response, text, voice="Rachel"):
 
 # Enhanced gather function that plays audio directly from S3
 def enhanced_gather(response, text, options, voice="Rachel"):
-    gather = Gather(input='speech', action='/intent', method='POST', language='en-US', speechTimeout='auto')
+    gather = Gather(input='speech dtmf', action='/intent', method='POST', language='en-US', speechTimeout='auto', timeout=3)
     
-    # For now, we're using the S3 URL directly for the greeting
-    # In the future, this could be expanded to use more S3 URLs for common phrases
-    if text.lower() == "hello, thank you for calling vanguard chiropractic. how may i help you today?":
+    # Always use S3 URL for the greeting, regardless of exact text matching
+    if "thank you for calling vanguard chiropractic" in text.lower():
+        logger.info(f"Using S3 URL for greeting in gather: {S3_GREETING_URL}")
         gather.play(S3_GREETING_URL)
     else:
         # For other text, we'll use Twilio's Say verb as a fallback
         gather.say(text, voice="Polly.Joanna" if voice == "Rachel" else "Polly.Miguel")
     
     response.append(gather)
+    # Add a redirect in case the user doesn't input anything
+    response.redirect('/voice')
     return response
 
 @routes_bp.route('/voice', methods=['GET', 'POST'])
