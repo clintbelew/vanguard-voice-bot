@@ -18,25 +18,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants with absolute paths - define at module level
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE_DIR = os.path.join(BASE_DIR, 'audio_cache')
-
-# Create audio cache directory immediately
-try:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    logger.info(f"Audio cache directory created at: {CACHE_DIR}")
-except Exception as e:
-    logger.error(f"Error creating audio cache directory: {str(e)}")
-
-# Create logs directory with absolute path
-LOGS_DIR = os.path.join(BASE_DIR, 'logs')
-try:
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    logger.info(f"Logs directory created at: {LOGS_DIR}")
-except Exception as e:
-    logger.error(f"Error creating logs directory: {str(e)}")
-
 # Create blueprint
 audio_bp = Blueprint('audio', __name__)
 
@@ -44,17 +25,26 @@ audio_bp = Blueprint('audio', __name__)
 def serve_audio(filename):
     """Serve cached audio files with CORS headers to allow Twilio access."""
     try:
-        # Use the global CACHE_DIR directly - no local variable needed
-        logger.info(f"Serving audio file: {filename} from {CACHE_DIR}")
+        # Define cache directory using environment-aware approach
+        cache_dir = os.environ.get('AUDIO_CACHE_DIR')
+        if not cache_dir:
+            # Fallback to a default path if environment variable is not set
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_dir = os.path.join(base_dir, 'audio_cache')
+            # Ensure directory exists
+            os.makedirs(cache_dir, exist_ok=True)
+            logger.info(f"Using default audio cache directory: {cache_dir}")
+        
+        logger.info(f"Serving audio file: {filename} from {cache_dir}")
         
         # Check if file exists before attempting to serve
-        file_path = os.path.join(CACHE_DIR, filename)
+        file_path = os.path.join(cache_dir, filename)
         if not os.path.exists(file_path):
             logger.error(f"Audio file not found: {file_path}")
             return Response(f"Audio file not found: {filename}", status=404)
             
         # Create response with file
-        response = send_from_directory(CACHE_DIR, filename)
+        response = send_from_directory(cache_dir, filename)
         
         # Add CORS headers to allow Twilio to access the audio files
         response.headers['Access-Control-Allow-Origin'] = '*'
@@ -65,10 +55,6 @@ def serve_audio(filename):
         
         logger.info(f"Added CORS headers to response for {filename}")
         return response
-    except NameError as e:
-        logger.error(f"NameError serving audio file {filename}: {str(e)}")
-        # Return a more specific error for debugging
-        return Response(f"NameError: {str(e)}", status=500)
     except Exception as e:
         logger.error(f"Error serving audio file {filename}: {str(e)}")
         # Return a more specific error for debugging
@@ -87,8 +73,14 @@ def options_audio(filename):
 def clear_cache():
     """Clear the audio cache directory."""
     try:
-        # Use the global CACHE_DIR directly - no local variable needed
-        for file in Path(CACHE_DIR).glob('*.mp3'):
+        # Define cache directory using environment-aware approach
+        cache_dir = os.environ.get('AUDIO_CACHE_DIR')
+        if not cache_dir:
+            # Fallback to a default path if environment variable is not set
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_dir = os.path.join(base_dir, 'audio_cache')
+        
+        for file in Path(cache_dir).glob('*.mp3'):
             file.unlink()
         logger.info("Audio cache cleared")
         return True
@@ -99,8 +91,14 @@ def clear_cache():
 def get_cache_stats():
     """Get statistics about the audio cache."""
     try:
-        # Use the global CACHE_DIR directly - no local variable needed
-        files = list(Path(CACHE_DIR).glob('*.mp3'))
+        # Define cache directory using environment-aware approach
+        cache_dir = os.environ.get('AUDIO_CACHE_DIR')
+        if not cache_dir:
+            # Fallback to a default path if environment variable is not set
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_dir = os.path.join(base_dir, 'audio_cache')
+        
+        files = list(Path(cache_dir).glob('*.mp3'))
         total_size = sum(f.stat().st_size for f in files)
         stats = {
             'file_count': len(files),
@@ -123,13 +121,19 @@ def prune_cache(max_size_mb=100):
     Removes oldest files first based on modification time.
     """
     try:
-        # Use the global CACHE_DIR directly - no local variable needed
+        # Define cache directory using environment-aware approach
+        cache_dir = os.environ.get('AUDIO_CACHE_DIR')
+        if not cache_dir:
+            # Fallback to a default path if environment variable is not set
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_dir = os.path.join(base_dir, 'audio_cache')
+        
         stats = get_cache_stats()
         if stats['total_size_mb'] <= max_size_mb:
             return True
         
         # Get files sorted by modification time (oldest first)
-        files = sorted(Path(CACHE_DIR).glob('*.mp3'), key=lambda f: f.stat().st_mtime)
+        files = sorted(Path(cache_dir).glob('*.mp3'), key=lambda f: f.stat().st_mtime)
         
         # Remove files until we're under the limit
         while stats['total_size_mb'] > max_size_mb and files:
