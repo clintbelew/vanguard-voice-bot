@@ -1,10 +1,9 @@
 """
-Updated routes.py with ElevenLabs integration, improved intent recognition,
-multilingual support for English and Spanish, and URL sanitization.
+Simplified routes.py with direct S3 URL integration for voice bot.
 
 This module contains the main routes for the voice bot application with
-enhanced ElevenLabs voice integration, improved intent recognition,
-multilingual support, and optimized conversation flow.
+direct S3 URL integration for the greeting message, removing dependency
+on the problematic audio_manager.py file.
 """
 
 from flask import Blueprint, request, url_for, jsonify
@@ -19,15 +18,7 @@ from app.twilio_utils import (
     log_speech_input,
     log_error
 )
-from app.response_builder import (
-    enhanced_say, 
-    enhanced_gather, 
-    add_background_ambiance, 
-    detect_language, 
-    validate_url,
-    sanitize_twiml
-)
-from app.elevenlabs_integration import is_configured
+from app.response_builder import enhanced_say, enhanced_gather, add_background_ambiance, detect_language
 from config.config import GREETING_MESSAGE, GREETING_MESSAGE_SPANISH, ERROR_MESSAGES, ERROR_MESSAGES_SPANISH
 import logging
 import re
@@ -51,6 +42,12 @@ logger = logging.getLogger(__name__)
 # Create blueprint
 main = Blueprint('main', __name__)
 
+# S3 URL for the greeting audio
+S3_GREETING_URL = "https://chirodesk-audio.s3.us-east-2.amazonaws.com/ElevenLabs_2025-04-20T04_45_30_Rachel_pre_sp100_s50_sb75_se0_b_m2.mp3"
+
+# Constants
+OFFICE_AMBIANCE_URL = "https://storage.googleapis.com/vanguard-voice-assets/office_ambiance_low.mp3"
+
 @main.route('/')
 def index():
     """Home page route."""
@@ -58,23 +55,22 @@ def index():
 
 @main.route('/test')
 def test():
-    """Test route to verify ElevenLabs integration."""
-    elevenlabs_configured = is_configured()
+    """Test route to verify S3 integration."""
     return jsonify({
         "status": "ok",
-        "elevenlabs_configured": elevenlabs_configured,
-        "message": "Voice bot test endpoint"
+        "s3_greeting_url": S3_GREETING_URL,
+        "message": "Voice bot test endpoint with S3 integration"
     })
 
 @main.route('/voice', methods=['GET', 'POST'])
 def voice():
-    """Handle incoming voice calls with multilingual support."""
+    """Handle incoming voice calls with multilingual support and direct S3 URL for greeting."""
     try:
         # Create TwiML response
         response = VoiceResponse()
         
         # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
+        response.play(OFFICE_AMBIANCE_URL, loop=0, volume=0.1)
         
         # Get caller information
         caller_number = request.values.get('From', '')
@@ -82,19 +78,22 @@ def voice():
         
         # Check if this is the initial call or a continuation
         if 'SpeechResult' not in request.values:
-            # Initial call - greet the caller in English
-            logger.info("Initial call - greeting caller in English")
-            enhanced_gather(
-                response=response,
-                text=GREETING_MESSAGE,
-                action=url_for('main.handle_response'),
-                input_types='speech dtmf',
+            # Initial call - greet the caller in English using S3 URL directly
+            logger.info("Initial call - greeting caller in English using S3 URL")
+            
+            # Create the Gather verb
+            gather = Gather(
+                input='speech dtmf',
                 timeout=3,
                 speech_timeout='auto',
-                speech_model='phone_call',
-                language='en-US',
-                enhanced=True
+                action=url_for('main.handle_response'),
+                language='en-US'
             )
+            gather.speech_model = 'phone_call'
+            
+            # Play the S3 greeting audio directly
+            gather.play(S3_GREETING_URL)
+            response.append(gather)
             
             # If no input is received, repeat the greeting
             response.redirect(url_for('main.voice'))
@@ -107,10 +106,7 @@ def voice():
             # Redirect to handle_response
             response.redirect(url_for('main.handle_response'))
         
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in voice route: {str(e)}"
@@ -120,11 +116,7 @@ def voice():
         # Create a fallback response
         response = VoiceResponse()
         enhanced_say(response, ERROR_MESSAGES['general'])
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        return str(response)
 
 @main.route('/handle-response', methods=['POST'])
 def handle_response():
@@ -134,7 +126,7 @@ def handle_response():
         response = VoiceResponse()
         
         # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
+        response.play(OFFICE_AMBIANCE_URL, loop=0, volume=0.1)
         
         # Get the user's speech or DTMF input
         speech_result = request.values.get('SpeechResult', '').lower()
@@ -169,11 +161,7 @@ def handle_response():
                 language=language,
                 enhanced=True
             )
-            
-            # Apply final TwiML sanitization before returning
-            twiml_response = str(response)
-            sanitized_twiml = sanitize_twiml(twiml_response)
-            return sanitized_twiml
+            return str(response)
         
         # Handle based on detected language
         if language == "es-MX":
@@ -250,11 +238,8 @@ def handle_response():
                 speech_model='phone_call',
                 language="en-US"
             )
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+            
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in handle_response route: {str(e)}"
@@ -264,11 +249,7 @@ def handle_response():
         # Create a fallback response
         response = VoiceResponse()
         enhanced_say(response, ERROR_MESSAGES['input_not_understood'], language="en-US")
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        return str(response)
 
 @main.route('/handle-spanish-response', methods=['POST'])
 def handle_spanish_response():
@@ -278,7 +259,7 @@ def handle_spanish_response():
         response = VoiceResponse()
         
         # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
+        response.play(OFFICE_AMBIANCE_URL, loop=0, volume=0.1)
         
         # Get the user's speech or DTMF input
         speech_result = request.values.get('SpeechResult', '').lower()
@@ -308,11 +289,7 @@ def handle_spanish_response():
                 language="en-US",
                 enhanced=True
             )
-            
-            # Apply final TwiML sanitization before returning
-            twiml_response = str(response)
-            sanitized_twiml = sanitize_twiml(twiml_response)
-            return sanitized_twiml
+            return str(response)
         
         # Spanish appointment intent phrases
         appointment_phrases_spanish = [
@@ -371,7 +348,6 @@ def handle_spanish_response():
             logger.info("Spanish intent detected: Reschedule appointment")
             # Handle Spanish appointment rescheduling
             enhanced_say(response, "Para cambiar su cita, necesito conectarle con nuestro equipo de programación. Por favor, espere un momento.", language="es-MX")
-            # Add code to transfer to scheduling team here
             
         else:
             logger.info(f"No specific Spanish intent detected for: '{speech_result}'")
@@ -388,11 +364,8 @@ def handle_spanish_response():
                 speech_model='phone_call',
                 language="es-MX"
             )
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+            
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in handle_spanish_response route: {str(e)}"
@@ -401,12 +374,8 @@ def handle_spanish_response():
         
         # Create a fallback response
         response = VoiceResponse()
-        enhanced_say(response, ERROR_MESSAGES_SPANISH['general'], language="es-MX")
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        enhanced_say(response, ERROR_MESSAGES_SPANISH['input_not_understood'], language="es-MX")
+        return str(response)
 
 @main.route('/handle-transfer', methods=['POST'])
 def handle_transfer():
@@ -415,28 +384,18 @@ def handle_transfer():
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
-        
         # Get the user's speech or DTMF input
         speech_result = request.values.get('SpeechResult', '').lower()
-        dtmf = request.values.get('Digits', '')
-        
-        # Log the speech input
-        caller_number = request.values.get('From', '')
-        log_speech_input(speech_result, caller_number)
         
         # Check if user wants to be transferred
-        if any(word in speech_result for word in ['yes', 'yeah', 'sure', 'please', 'ok', 'okay', 'connect', 'transfer']):
-            logger.info("User requested transfer to a human")
-            enhanced_say(response, "I'll connect you with someone right away. Please hold while I transfer your call.", language="en-US")
+        if any(word in speech_result for word in ['yes', 'yeah', 'sure', 'please', 'ok', 'okay']):
+            enhanced_say(response, "I'll connect you with someone right away. Please hold.", language="en-US")
             # Add code to transfer to a human here
         else:
-            logger.info("User declined transfer to a human")
-            enhanced_say(response, "Alright, I'll continue to assist you. Is there anything else I can help with?", language="en-US")
+            enhanced_say(response, "Alright, is there anything else I can help you with?", language="en-US")
             enhanced_gather(
                 response=response,
-                text="Please let me know how else I can help you today.",
+                text="Please let me know how else I can assist you.",
                 action=url_for('main.handle_response'),
                 input_types='speech dtmf',
                 timeout=3,
@@ -445,10 +404,7 @@ def handle_transfer():
                 language="en-US"
             )
         
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in handle_transfer route: {str(e)}"
@@ -457,12 +413,8 @@ def handle_transfer():
         
         # Create a fallback response
         response = VoiceResponse()
-        enhanced_say(response, ERROR_MESSAGES['general'], language="en-US")
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        enhanced_say(response, ERROR_MESSAGES['transfer_error'], language="en-US")
+        return str(response)
 
 @main.route('/handle-spanish-transfer', methods=['POST'])
 def handle_spanish_transfer():
@@ -471,28 +423,18 @@ def handle_spanish_transfer():
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
-        
         # Get the user's speech or DTMF input
         speech_result = request.values.get('SpeechResult', '').lower()
-        dtmf = request.values.get('Digits', '')
-        
-        # Log the speech input
-        caller_number = request.values.get('From', '')
-        log_speech_input(speech_result, caller_number)
         
         # Check if user wants to be transferred
-        if any(word in speech_result for word in ['sí', 'si', 'claro', 'por favor', 'ok', 'conecte', 'transferir']):
-            logger.info("Spanish-speaking user requested transfer to a human")
-            enhanced_say(response, "Le conectaré con alguien de inmediato. Por favor, espere mientras transfiero su llamada.", language="es-MX")
+        if any(word in speech_result for word in ['sí', 'si', 'claro', 'por favor', 'ok', 'okay']):
+            enhanced_say(response, "Le conectaré con alguien de inmediato. Por favor, espere.", language="es-MX")
             # Add code to transfer to a human here
         else:
-            logger.info("Spanish-speaking user declined transfer to a human")
-            enhanced_say(response, "Muy bien, continuaré asistiéndole. ¿Hay algo más en lo que pueda ayudarle?", language="es-MX")
+            enhanced_say(response, "Muy bien, ¿hay algo más en lo que pueda ayudarle?", language="es-MX")
             enhanced_gather(
                 response=response,
-                text="Por favor, dígame en qué más puedo ayudarle hoy.",
+                text="Por favor, dígame en qué más puedo ayudarle.",
                 action=url_for('main.handle_spanish_response'),
                 input_types='speech dtmf',
                 timeout=3,
@@ -501,10 +443,7 @@ def handle_spanish_transfer():
                 language="es-MX"
             )
         
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in handle_spanish_transfer route: {str(e)}"
@@ -513,12 +452,8 @@ def handle_spanish_transfer():
         
         # Create a fallback response
         response = VoiceResponse()
-        enhanced_say(response, ERROR_MESSAGES_SPANISH['general'], language="es-MX")
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        enhanced_say(response, ERROR_MESSAGES_SPANISH['transfer_error'], language="es-MX")
+        return str(response)
 
 @main.route('/handle-spanish-appointment', methods=['POST'])
 def handle_spanish_appointment():
@@ -527,35 +462,21 @@ def handle_spanish_appointment():
         # Create TwiML response
         response = VoiceResponse()
         
-        # Add subtle background ambiance
-        add_background_ambiance(response, volume=0.1)
-        
         # Get the user's speech or DTMF input
         speech_result = request.values.get('SpeechResult', '').lower()
-        dtmf = request.values.get('Digits', '')
         
-        # Log the speech input
-        caller_number = request.values.get('From', '')
-        log_speech_input(speech_result, caller_number)
-        
-        # Check if user prefers morning or afternoon
+        # Simple logic to handle morning/afternoon preference
         if any(word in speech_result for word in ['mañana', 'manana', 'temprano']):
-            logger.info("Spanish-speaking user prefers morning appointment")
-            enhanced_say(response, "Tenemos disponibilidad los lunes, miércoles y viernes por la mañana. Le conectaré con nuestro equipo de programación para confirmar el día exacto. Por favor, espere un momento.", language="es-MX")
-            # Add code to transfer to scheduling team here
-        elif any(word in speech_result for word in ['tarde', 'noche', 'después', 'despues']):
-            logger.info("Spanish-speaking user prefers afternoon appointment")
-            enhanced_say(response, "Tenemos disponibilidad los martes y jueves por la tarde. Le conectaré con nuestro equipo de programación para confirmar el día exacto. Por favor, espere un momento.", language="es-MX")
-            # Add code to transfer to scheduling team here
+            enhanced_say(response, "Tenemos disponibilidad los lunes, miércoles y viernes por la mañana. Para programar una cita específica, necesito conectarle con nuestro equipo de programación.", language="es-MX")
+        elif any(word in speech_result for word in ['tarde', 'noche']):
+            enhanced_say(response, "Tenemos disponibilidad los martes y jueves por la tarde. Para programar una cita específica, necesito conectarle con nuestro equipo de programación.", language="es-MX")
         else:
-            logger.info("Could not determine Spanish-speaking user's appointment preference")
-            enhanced_say(response, "No pude entender su preferencia. Le conectaré con nuestro equipo de programación para ayudarle a encontrar el mejor horario para su cita. Por favor, espere un momento.", language="es-MX")
-            # Add code to transfer to scheduling team here
+            enhanced_say(response, "No pude entender su preferencia. Para programar una cita, necesito conectarle con nuestro equipo de programación.", language="es-MX")
         
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
+        enhanced_say(response, "Le conectaré con nuestro equipo de programación ahora. Por favor, espere un momento.", language="es-MX")
+        # Add code to transfer to scheduling team here
+        
+        return str(response)
     except Exception as e:
         # Log the error
         error_msg = f"Error in handle_spanish_appointment route: {str(e)}"
@@ -565,51 +486,4 @@ def handle_spanish_appointment():
         # Create a fallback response
         response = VoiceResponse()
         enhanced_say(response, ERROR_MESSAGES_SPANISH['appointment_error'], language="es-MX")
-        
-        # Apply final TwiML sanitization before returning
-        twiml_response = str(response)
-        sanitized_twiml = sanitize_twiml(twiml_response)
-        return sanitized_twiml
-
-@main.route('/audio/<filename>', methods=['GET', 'OPTIONS'])
-def serve_audio(filename):
-    """
-    Serve audio files with proper CORS headers.
-    This route handles both regular GET requests and CORS preflight OPTIONS requests.
-    """
-    from flask import send_from_directory, make_response
-    
-    # Handle CORS preflight OPTIONS request
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        return response
-    
-    try:
-        # Get the audio file path
-        audio_file_path = os.path.join(CACHE_DIR, filename)
-        
-        # Check if the file exists
-        if not os.path.exists(audio_file_path):
-            logger.error(f"Audio file not found: {audio_file_path}")
-            return "Audio file not found", 404
-        
-        # Create a response with the audio file
-        response = make_response(send_from_directory(CACHE_DIR, filename))
-        
-        # Add CORS headers to allow Twilio to access the audio files
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-        response.headers['Content-Type'] = 'audio/mpeg'
-        response.headers['Cache-Control'] = 'public, max-age=86400'
-        
-        return response
-    except Exception as e:
-        # Log the error
-        error_msg = f"Error serving audio file {filename}: {str(e)}"
-        log_error(error_msg)
-        logger.error(error_msg)
-        return "Error serving audio file", 500
+        return str(response)
