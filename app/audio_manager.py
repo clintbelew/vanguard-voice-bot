@@ -8,7 +8,7 @@ It provides routes for accessing cached audio files and utilities for audio mana
 import os
 import logging
 from pathlib import Path
-from flask import Blueprint, send_from_directory, abort
+from flask import Blueprint, send_from_directory, abort, current_app, request
 import shutil
 
 # Configure logging
@@ -34,13 +34,33 @@ audio_bp = Blueprint('audio', __name__)
 
 @audio_bp.route('/audio/<filename>')
 def serve_audio(filename):
-    """Serve cached audio files."""
+    """Serve cached audio files with CORS headers to allow Twilio access."""
     try:
         logger.info(f"Serving audio file: {filename} from {CACHE_DIR}")
-        return send_from_directory(CACHE_DIR, filename)
+        response = send_from_directory(CACHE_DIR, filename)
+        
+        # Add CORS headers to allow Twilio to access the audio files
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Content-Type'] = 'audio/mpeg'
+        response.headers['Cache-Control'] = 'public, max-age=86400'
+        
+        logger.info(f"Added CORS headers to response for {filename}")
+        return response
     except Exception as e:
         logger.error(f"Error serving audio file {filename}: {str(e)}")
         abort(404)
+
+@audio_bp.route('/audio/<filename>', methods=['OPTIONS'])
+def options_audio(filename):
+    """Handle OPTIONS requests for CORS preflight."""
+    response = current_app.make_default_options_response()
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    response.headers['Content-Type'] = 'audio/mpeg'
+    return response
 
 def clear_cache():
     """Clear the audio cache directory."""
