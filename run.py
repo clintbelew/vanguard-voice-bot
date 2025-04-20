@@ -1,3 +1,6 @@
+# Import werkzeug_fix first to patch werkzeug.urls
+import werkzeug_fix
+
 import os
 from app import create_app
 
