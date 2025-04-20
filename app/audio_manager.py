@@ -36,8 +36,10 @@ audio_bp = Blueprint('audio', __name__)
 def serve_audio(filename):
     """Serve cached audio files with CORS headers to allow Twilio access."""
     try:
-        logger.info(f"Serving audio file: {filename} from {CACHE_DIR}")
-        response = send_from_directory(CACHE_DIR, filename)
+        # Ensure CACHE_DIR is accessible in this function scope
+        cache_dir = CACHE_DIR
+        logger.info(f"Serving audio file: {filename} from {cache_dir}")
+        response = send_from_directory(cache_dir, filename)
         
         # Add CORS headers to allow Twilio to access the audio files
         response.headers['Access-Control-Allow-Origin'] = '*'
@@ -65,7 +67,9 @@ def options_audio(filename):
 def clear_cache():
     """Clear the audio cache directory."""
     try:
-        for file in Path(CACHE_DIR).glob('*.mp3'):
+        # Ensure CACHE_DIR is accessible in this function scope
+        cache_dir = CACHE_DIR
+        for file in Path(cache_dir).glob('*.mp3'):
             file.unlink()
         logger.info("Audio cache cleared")
         return True
@@ -76,7 +80,9 @@ def clear_cache():
 def get_cache_stats():
     """Get statistics about the audio cache."""
     try:
-        files = list(Path(CACHE_DIR).glob('*.mp3'))
+        # Ensure CACHE_DIR is accessible in this function scope
+        cache_dir = CACHE_DIR
+        files = list(Path(cache_dir).glob('*.mp3'))
         total_size = sum(f.stat().st_size for f in files)
         stats = {
             'file_count': len(files),
@@ -99,12 +105,14 @@ def prune_cache(max_size_mb=100):
     Removes oldest files first based on modification time.
     """
     try:
+        # Ensure CACHE_DIR is accessible in this function scope
+        cache_dir = CACHE_DIR
         stats = get_cache_stats()
         if stats['total_size_mb'] <= max_size_mb:
             return True
         
         # Get files sorted by modification time (oldest first)
-        files = sorted(Path(CACHE_DIR).glob('*.mp3'), key=lambda f: f.stat().st_mtime)
+        files = sorted(Path(cache_dir).glob('*.mp3'), key=lambda f: f.stat().st_mtime)
         
         # Remove files until we're under the limit
         while stats['total_size_mb'] > max_size_mb and files:
