@@ -299,7 +299,7 @@ def health_check():
     """Simple health check endpoint"""
     print("Health check endpoint called")
     logger.info("Health check endpoint called")
-    return jsonify({"status": "healthy", "service": "Vanguard Voice Bot Backend"})
+    return jsonify({"status": "ok"}), 200
 
 # Voice generation endpoint with OpenAI integration
 @app.route('/voice', methods=['POST'])
