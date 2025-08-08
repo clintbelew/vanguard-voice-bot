@@ -52,6 +52,26 @@ audio_files = {}
 # Store conversation context
 conversation_contexts = {}
 
+# Simple session store (in-memory). For production, swap to Redis.
+SESS = {}
+
+def tts_url(base, text):
+    """Helper function to generate TTS URL with proper encoding."""
+    return f"{base}/tts?text={urllib.parse.quote_plus(text)}"
+
+def bot_reply(text, call_sid):
+    """Generate bot reply using simple rules or OpenAI."""
+    # TODO: replace with OpenAI call. For now, super simple rules:
+    t = text.lower()
+    if any(k in t for k in ["book", "appointment", "schedule"]):
+        SESS.setdefault(call_sid, {})["intent"] = "booking"
+        return "Great, I can help you book. What day works best, and do you prefer morning or afternoon?"
+    if SESS.get(call_sid, {}).get("intent") == "booking":
+        # TODO: parse date/time/contact; for now, prompt for details step by step
+        return "Got it. Could I have your full name and a mobile number to confirm the booking?"
+    # fallback small talk / FAQ
+    return "I can help with hours, location, services, or I can schedule you. What would you like?"
+
 # ElevenLabs TTS Configuration
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "cgSgspJ2msm6clMCkdW9")  # Jessica voice
@@ -1196,106 +1216,45 @@ def twilio_collect_phone():
 # Twilio conversation handoff endpoint
 @app.route('/twilio-handoff', methods=['POST'])
 def twilio_handoff():
-    """Handle conversation with OpenAI and booking functionality."""
-    logger.info("Twilio handoff endpoint called")
+    """Handle conversation with simplified Jessica-only responses."""
+    call_sid = request.values.get("CallSid", "NA")
+    user_text = request.values.get("SpeechResult", "")
+    base = request.url_root.rstrip("/")
     
-    try:
-        call_sid = request.values.get('CallSid')
-        speech_result = request.values.get('SpeechResult', '').strip()
-        logger.info(f"Call SID: {call_sid}, Speech result: {speech_result}")
-        
-        if not speech_result:
-            # No speech detected, redirect back to main flow
-            base_url = request.url_root.rstrip("/")
-            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    logger.info(f"Twilio handoff - Call SID: {call_sid}, Speech: {user_text}")
+
+    # Generate reply using simple rules (can be replaced with OpenAI)
+    reply = bot_reply(user_text, call_sid)
+    
+    logger.info(f"Generated reply: {reply}")
+
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Redirect>{base_url}/twilio</Redirect>
+  <Play>{tts_url(base, reply)}</Play>
+  <Redirect>/twilio</Redirect>
 </Response>"""
-            return Response(twiml, mimetype="text/xml")
-        
-        # Get or initialize conversation context
-        if call_sid not in conversation_contexts:
-            conversation_contexts[call_sid] = {
-                'messages': [],
-                'state': 'conversation'
-            }
-        
-        context = conversation_contexts[call_sid]
-        
-        # Add user message to conversation history
-        context['messages'].append({"role": "user", "content": speech_result})
-        
-        # Generate response using OpenAI with function calling
-        response_text = generate_conversation_response(speech_result, context['messages'], call_sid)
-        
-        # Add assistant response to conversation history
-        context['messages'].append({"role": "assistant", "content": response_text})
-        
-        # Create TwiML response with Jessica TTS
-        base_url = request.url_root.rstrip("/")
-        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(response_text)}"
-        
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>{tts_url}</Play>
-  <Redirect>{base_url}/twilio</Redirect>
-</Response>"""
-        
-        logger.info(f"Generated response: {response_text}")
-        logger.info(f"Generated TwiML: {twiml}")
-        return Response(twiml, mimetype="text/xml")
-        
-    except Exception as e:
-        logger.error(f"Error in twilio-handoff: {str(e)}")
-        
-        # Error recovery response
-        base_url = request.url_root.rstrip("/")
-        recovery_text = "I didn't catch that—could you rephrase or tell me what time you'd like to come in?"
-        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(recovery_text)}"
-        
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>{tts_url}</Play>
-  <Redirect>{base_url}/twilio</Redirect>
-</Response>"""
-        
-        return Response(twiml, mimetype="text/xml")
+    
+    logger.info(f"Generated TwiML: {twiml}")
+    return Response(twiml, mimetype="text/xml")
 
 # Fallback route for any Twilio-related requests
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def fallback_route(path):
     """Handle /twilio route and other fallback routes."""
     if path == 'twilio':
-        # Handle the main Twilio webhook with conversation flow
+        # Handle the main Twilio webhook with simplified conversation flow
         logger.info("Twilio main webhook called at /twilio")
         
-        call_sid = request.values.get('CallSid')
-        logger.info(f"Call SID: {call_sid}")
+        base = request.url_root.rstrip("/")
+        greet = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
         
-        # Initialize or get conversation context for this call
-        if call_sid not in conversation_contexts:
-            conversation_contexts[call_sid] = {
-                'messages': [],
-                'state': 'greeting'
-            }
-        
-        # Get greeting text (can be customized based on context)
-        greeting_text = request.values.get(
-            "text",
-            "Hi! Thanks for calling Vanguard Chiropractic. This is Jessica. How can I help you today?"
-        )
-        
-        base_url = request.url_root.rstrip("/")
-        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(greeting_text)}"
-        
-        # Create TwiML with speech gathering
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>{tts_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto" action="{base_url}/twilio-handoff" method="POST">
+  <Play>{base}/tts?text={urllib.parse.quote_plus(greet)}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto" action="/twilio-handoff" method="POST">
+    <Pause length="1"/>
   </Gather>
-  <Say>I didn't hear anything. Let me try again.</Say>
-  <Redirect>{base_url}/twilio</Redirect>
+  <Redirect>/twilio</Redirect>
 </Response>"""
         
         logger.info(f"Generated TwiML for /twilio: {twiml}")
