@@ -60,17 +60,167 @@ def tts_url(base, text):
     return f"{base}/tts?text={urllib.parse.quote_plus(text)}"
 
 def bot_reply(text, call_sid):
-    """Generate bot reply using simple rules or OpenAI."""
-    # TODO: replace with OpenAI call. For now, super simple rules:
-    t = text.lower()
-    if any(k in t for k in ["book", "appointment", "schedule"]):
-        SESS.setdefault(call_sid, {})["intent"] = "booking"
-        return "Great, I can help you book. What day works best, and do you prefer morning or afternoon?"
-    if SESS.get(call_sid, {}).get("intent") == "booking":
-        # TODO: parse date/time/contact; for now, prompt for details step by step
-        return "Got it. Could I have your full name and a mobile number to confirm the booking?"
-    # fallback small talk / FAQ
-    return "I can help with hours, location, services, or I can schedule you. What would you like?"
+    """Generate bot reply using OpenAI with Jessica's professional system prompt."""
+    try:
+        if not OPENAI_API_KEY:
+            return "I'm sorry, but I'm having trouble accessing my system right now. Could you please call back in a few minutes?"
+        
+        # Get or initialize conversation context for this call
+        if call_sid not in SESS:
+            SESS[call_sid] = {
+                'messages': [],
+                'booking_state': None,
+                'booking_data': {}
+            }
+        
+        context = SESS[call_sid]
+        
+        # Jessica's professional system prompt
+        system_message = {
+            "role": "system",
+            "content": f"""You are Jessica, a warm, friendly, and highly competent front-desk receptionist for {BUSINESS_NAME}. Your goal is to make callers feel welcome, understood, and cared for—while smoothly guiding them toward scheduling an appointment when appropriate.
+
+Speak in short, natural sentences like a real person would in a phone conversation. Sound confident, approachable, and genuinely interested in helping.
+
+Business Information:
+- Name: {BUSINESS_NAME}
+- Location: {BUSINESS_LOCATION}
+- Phone: {BUSINESS_PHONE}
+- Hours: Monday-Friday 9 AM to 6 PM, Saturday 10 AM to 2 PM, closed Sundays
+
+Services we offer:
+- Chiropractic adjustments
+- Physical therapy
+- Massage therapy
+- Wellness consultations
+
+Behavior Rules:
+1. Always address the caller politely, and adapt to their mood and pace.
+2. Keep answers brief and conversational—no more than 2 sentences at a time.
+3. If a caller asks about hours, location, services, or pricing, answer clearly and then pivot back to how you can help them book an appointment.
+4. If the caller sounds ready to book, ask for: Full name, Phone number (confirm digits), Email (confirm spelling), Preferred appointment date & time
+5. Use the booking tool when you have all required information to create the appointment.
+6. If the time requested is unavailable, politely suggest the closest available slots.
+7. If a question falls outside your knowledge, politely redirect: "That's a great question—let me connect you with a team member who can help with that."
+8. Always close the call by thanking them warmly and confirming they have all the info they need.
+
+Style Notes:
+- Speak like a real person, not a robot—vary sentence structure slightly.
+- Avoid reading long lists—summarize when possible.
+- Use positive language: "I can help with that," "Absolutely," "Of course."
+"""
+        }
+        
+        # Add user message to conversation history
+        context['messages'].append({"role": "user", "content": text})
+        
+        # Prepare messages for OpenAI (keep system message + last 10 exchanges)
+        messages = [system_message]
+        if context['messages']:
+            messages.extend(context['messages'][-20:])  # Keep last 20 messages (10 exchanges)
+        
+        # Define the booking function for OpenAI
+        functions = [
+            {
+                "name": "book_appointment",
+                "description": "Book an appointment for a patient when you have collected all required information",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Patient's full name"
+                        },
+                        "phone": {
+                            "type": "string",
+                            "description": "Patient's phone number"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "Patient's email address"
+                        },
+                        "datetime_iso": {
+                            "type": "string",
+                            "description": "Appointment date and time in ISO format (e.g., 2025-08-12T15:30:00Z)"
+                        }
+                    },
+                    "required": ["name", "phone", "email", "datetime_iso"]
+                }
+            }
+        ]
+        
+        # Call OpenAI API
+        response = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            functions=functions,
+            function_call="auto",
+            max_tokens=150,
+            temperature=0.7
+        )
+        
+        message = response.choices[0].message
+        
+        # Check if OpenAI wants to call the booking function
+        if message.get("function_call"):
+            function_name = message["function_call"]["name"]
+            function_args = json.loads(message["function_call"]["arguments"])
+            
+            if function_name == "book_appointment":
+                # Call the booking function
+                booking_result = book_appointment_tool(
+                    function_args.get("name"),
+                    function_args.get("phone"),
+                    function_args.get("email"),
+                    function_args.get("datetime_iso")
+                )
+                
+                # Add the booking result to conversation
+                booking_response = f"Perfect! I've booked your appointment. {booking_result}"
+                context['messages'].append({"role": "assistant", "content": booking_response})
+                return booking_response
+        
+        # Get the regular conversational response
+        reply = message["content"].strip()
+        
+        # Add assistant response to conversation history
+        context['messages'].append({"role": "assistant", "content": reply})
+        
+        return reply
+        
+    except Exception as e:
+        logger.error(f"Error generating bot reply: {str(e)}")
+        return "I didn't catch that—could you rephrase or tell me what time you'd like to come in?"
+
+def book_appointment_tool(name, phone, email, datetime_iso):
+    """Tool function to book appointments via GoHighLevel API."""
+    try:
+        logger.info(f"Booking appointment for {name} at {datetime_iso}")
+        
+        # Prepare booking data
+        booking_data = {
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "datetime": datetime_iso
+        }
+        
+        # Call the existing /book endpoint internally
+        with app.test_client() as client:
+            response = client.post('/book', 
+                                 json=booking_data,
+                                 headers={'Content-Type': 'application/json'})
+            
+            if response.status_code == 200:
+                result = response.get_json()
+                return f"Your appointment is confirmed for {datetime_iso}. We'll send you a confirmation."
+            else:
+                logger.error(f"Booking failed with status {response.status_code}: {response.data}")
+                return "I wasn't able to complete the booking right now. Let me connect you with someone who can help."
+                
+    except Exception as e:
+        logger.error(f"Error in booking tool: {str(e)}")
+        return "I'm having trouble with our booking system. Would you like me to connect you with someone who can help?"
 
 # ElevenLabs TTS Configuration
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
