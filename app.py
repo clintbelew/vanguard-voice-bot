@@ -169,48 +169,26 @@ def twilio_entry():
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Handle conversation with Jessica using OpenAI and booking functionality."""
+    """Handle conversation - DEBUGGING VERSION: Echo back what Twilio heard."""
+    # Add detailed logging
+    app.logger.info(f"/twilio-handoff form: {dict(request.form)}")
+    app.logger.info(f"/twilio-handoff values: {dict(request.values)}")
+    
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
-    user_text = request.values.get("SpeechResult", "") or ""
-    session = get_session(call_sid)
+    heard = request.values.get("SpeechResult", "")
     
-    logger.info(f"Twilio handoff - CallSid: {call_sid}, Speech: {user_text}")
-
-    # store user turn
-    if not any(m["role"] == "system" for m in session["history"]):
-        session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-    session["history"].append({"role": "user", "content": user_text})
-
-    # Use OpenAI to generate response
-    assistant = openai_chat(session["history"])
-    reply_text = None
-
-    # Example lightweight tool convention:
-    # If the assistant replies with a line starting BOOK: JSON {...}, parse and call booking.
-    if assistant.strip().startswith("BOOK:"):
-        try:
-            data_json = assistant.split("BOOK:", 1)[1].strip()
-            data = json.loads(data_json)
-            ok, msg = try_booking(
-                name=data.get("name",""),
-                phone=data.get("phone",""),
-                email=data.get("email",""),
-                datetime_iso=data.get("datetime",""),
-            )
-            reply_text = msg
-        except Exception as e:
-            logger.error(f"Booking parsing error: {str(e)}")
-            reply_text = "I had trouble booking that. Could I confirm your full name, mobile number, email, and a good time?"
+    logger.info(f"Twilio handoff DEBUG - CallSid: {call_sid}, SpeechResult: '{heard}'")
+    
+    # Echo back exactly what Twilio heard
+    if not heard:
+        reply = "I didn't hear anything. Could you try again a bit closer to the phone?"
     else:
-        reply_text = assistant
-
-    # store assistant turn
-    session["history"].append({"role": "assistant", "content": reply_text})
+        reply = f"You said: {heard}. Did I get that right?"
     
-    logger.info(f"Generated reply: {reply_text}")
-
-    tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply_text)}"
+    logger.info(f"DEBUG reply: {reply}")
+    
+    tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{tts_url}</Play>
