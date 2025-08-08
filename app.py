@@ -6,6 +6,7 @@ import io
 import base64
 import json
 import sys
+import urllib.parse
 from flask import Flask, request, jsonify, send_file, Response, session
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Gather
@@ -50,6 +51,36 @@ audio_files = {}
 
 # Store conversation context
 conversation_contexts = {}
+
+# ElevenLabs TTS Configuration
+ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
+VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "cgSgspJ2msm6clMCkdW9")  # Jessica voice
+ELEVEN_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+
+def tts_bytes(text: str) -> bytes:
+    """Generate TTS audio bytes using ElevenLabs API."""
+    if not ELEVEN_KEY:
+        raise ValueError("ELEVENLABS_API_KEY not configured")
+    
+    r = requests.post(
+        ELEVEN_URL,
+        headers={
+            "xi-api-key": ELEVEN_KEY, 
+            "Accept": "audio/mpeg", 
+            "Content-Type": "application/json"
+        },
+        json={
+            "text": text, 
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5, 
+                "similarity_boost": 0.8
+            }
+        },
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.content
 
 # Simple test endpoint that always returns a valid TwiML response
 @app.route('/twilio-test', methods=['GET', 'POST'])
@@ -300,6 +331,21 @@ def health_check():
     print("Health check endpoint called")
     logger.info("Health check endpoint called")
     return jsonify({"status": "ok"}), 200
+
+# TTS endpoint for Twilio
+@app.route("/tts", methods=["GET"])
+def tts_get():
+    """Generate TTS audio using ElevenLabs for Twilio."""
+    text = request.args.get("text", "Thanks for calling Vanguard. How can we help you today?")
+    logger.info(f"TTS endpoint called with text: {text}")
+    
+    try:
+        audio_bytes = tts_bytes(text)
+        return Response(audio_bytes, mimetype="audio/mpeg")
+    except Exception as e:
+        logger.error(f"Error generating TTS: {str(e)}")
+        # Return a simple error response
+        return Response(b"", mimetype="audio/mpeg", status=500)
 
 # Voice generation endpoint with OpenAI integration
 @app.route('/voice', methods=['POST'])
@@ -1012,8 +1058,28 @@ def twilio_collect_phone():
 # Fallback route for any Twilio-related requests
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def fallback_route(path):
-    """Fallback route to catch any mistyped Twilio webhook URLs."""
-    if path.startswith('twilio') or path.startswith('twilio-'):
+    """Handle /twilio route and other fallback routes."""
+    if path == 'twilio':
+        # Handle the main Twilio webhook directly
+        logger.info("Twilio main webhook called at /twilio")
+        
+        greeting_text = request.values.get(
+            "text",
+            "Thanks for calling Vanguard Chiropractic. Jessica is now handling this line."
+        )
+        base_url = request.url_root.rstrip("/")
+        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(greeting_text)}"
+        
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>{tts_url}</Play>
+</Response>"""
+        
+        logger.info(f"Generated TwiML for /twilio: {twiml}")
+        return Response(twiml, mimetype="text/xml")
+    
+    elif path.startswith('twilio') or path.startswith('twilio-'):
+        # Handle other Twilio-related paths with fallback
         print(f"Fallback route called for path: {path}")
         logger.info(f"Fallback route called for path: {path}")
         
