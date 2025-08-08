@@ -82,6 +82,144 @@ def tts_bytes(text: str) -> bytes:
     r.raise_for_status()
     return r.content
 
+def generate_conversation_response(user_input, conversation_history, call_sid):
+    """Generate conversational response using OpenAI with booking functionality."""
+    try:
+        if not OPENAI_API_KEY:
+            return "I'm sorry, but I'm having trouble accessing my system right now. Could you please call back in a few minutes?"
+        
+        # System prompt for voice conversation
+        system_message = {
+            "role": "system",
+            "content": f"""You are Jessica, a friendly voice assistant for {BUSINESS_NAME}. You're speaking on the phone, so keep responses conversational, concise, and natural for speech.
+
+Business Information:
+- Name: {BUSINESS_NAME}
+- Location: {BUSINESS_LOCATION}
+- Phone: {BUSINESS_PHONE}
+- Hours: Monday-Friday 9 AM to 6 PM, Saturday 10 AM to 2 PM, closed Sundays
+
+Guidelines:
+- Keep responses short and conversational (1-2 sentences max)
+- Sound natural and friendly like you're talking on the phone
+- Help with questions about hours, location, services, and booking appointments
+- For appointments, collect: name, phone, email, and preferred date/time
+- Confirm all details before booking
+- If you need to book an appointment, use the book_appointment function
+
+Services we offer:
+- Chiropractic adjustments
+- Physical therapy
+- Massage therapy
+- Wellness consultations"""
+        }
+        
+        # Prepare messages for OpenAI
+        messages = [system_message]
+        
+        # Add conversation history (keep last 10 messages to avoid token limits)
+        if conversation_history:
+            messages.extend(conversation_history[-10:])
+        
+        # Define the booking function for OpenAI
+        functions = [
+            {
+                "name": "book_appointment",
+                "description": "Book an appointment for a patient",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Patient's full name"
+                        },
+                        "phone": {
+                            "type": "string",
+                            "description": "Patient's phone number"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "Patient's email address"
+                        },
+                        "datetime_iso": {
+                            "type": "string",
+                            "description": "Appointment date and time in ISO format (e.g., 2025-08-12T15:30:00Z)"
+                        }
+                    },
+                    "required": ["name", "phone", "datetime_iso"]
+                }
+            }
+        ]
+        
+        # Call OpenAI API
+        response = openai.ChatCompletion.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            functions=functions,
+            function_call="auto",
+            max_tokens=150,
+            temperature=0.7
+        )
+        
+        message = response.choices[0].message
+        
+        # Check if OpenAI wants to call a function
+        if message.get("function_call"):
+            function_name = message["function_call"]["name"]
+            function_args = json.loads(message["function_call"]["arguments"])
+            
+            if function_name == "book_appointment":
+                # Call the booking function
+                booking_result = book_appointment_tool(
+                    function_args.get("name"),
+                    function_args.get("phone"),
+                    function_args.get("email"),
+                    function_args.get("datetime_iso")
+                )
+                
+                # Generate a response based on booking result
+                if "success" in booking_result.lower():
+                    return f"Perfect! I've booked your appointment. {booking_result}"
+                else:
+                    return f"I'm sorry, there was an issue with booking. {booking_result} Would you like me to connect you with someone who can help?"
+        
+        # Return the regular conversational response
+        return message["content"].strip()
+        
+    except Exception as e:
+        logger.error(f"Error generating conversation response: {str(e)}")
+        return "I didn't catch that—could you rephrase or tell me what time you'd like to come in?"
+
+def book_appointment_tool(name, phone, email, datetime_iso):
+    """Tool function to book appointments via GoHighLevel API."""
+    try:
+        logger.info(f"Booking appointment for {name} at {datetime_iso}")
+        
+        # Prepare booking data
+        booking_data = {
+            "name": name,
+            "phone": phone,
+            "email": email or f"{name.replace(' ', '').lower()}@example.com",  # Fallback email
+            "datetime": datetime_iso
+        }
+        
+        # Call the existing /book endpoint internally
+        with app.test_client() as client:
+            response = client.post('/book', 
+                                 json=booking_data,
+                                 headers={'Content-Type': 'application/json'})
+            
+            if response.status_code == 200:
+                result = response.get_json()
+                return f"Your appointment is confirmed for {datetime_iso}. We'll send you a confirmation."
+            else:
+                logger.error(f"Booking failed with status {response.status_code}: {response.data}")
+                return "I wasn't able to complete the booking right now. Let me connect you with someone who can help."
+                
+    except Exception as e:
+        logger.error(f"Error in booking tool: {str(e)}")
+        return "I'm having trouble with our booking system. Would you like me to connect you with someone who can help?"
+
 # Simple test endpoint that always returns a valid TwiML response
 @app.route('/twilio-test', methods=['GET', 'POST'])
 def twilio_test():
@@ -1055,24 +1193,109 @@ def twilio_collect_phone():
         logger.info(f"Fallback TwiML: {response}")
         return Response(str(response), mimetype='text/xml')
 
+# Twilio conversation handoff endpoint
+@app.route('/twilio-handoff', methods=['POST'])
+def twilio_handoff():
+    """Handle conversation with OpenAI and booking functionality."""
+    logger.info("Twilio handoff endpoint called")
+    
+    try:
+        call_sid = request.values.get('CallSid')
+        speech_result = request.values.get('SpeechResult', '').strip()
+        logger.info(f"Call SID: {call_sid}, Speech result: {speech_result}")
+        
+        if not speech_result:
+            # No speech detected, redirect back to main flow
+            base_url = request.url_root.rstrip("/")
+            twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Redirect>{base_url}/twilio</Redirect>
+</Response>"""
+            return Response(twiml, mimetype="text/xml")
+        
+        # Get or initialize conversation context
+        if call_sid not in conversation_contexts:
+            conversation_contexts[call_sid] = {
+                'messages': [],
+                'state': 'conversation'
+            }
+        
+        context = conversation_contexts[call_sid]
+        
+        # Add user message to conversation history
+        context['messages'].append({"role": "user", "content": speech_result})
+        
+        # Generate response using OpenAI with function calling
+        response_text = generate_conversation_response(speech_result, context['messages'], call_sid)
+        
+        # Add assistant response to conversation history
+        context['messages'].append({"role": "assistant", "content": response_text})
+        
+        # Create TwiML response with Jessica TTS
+        base_url = request.url_root.rstrip("/")
+        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(response_text)}"
+        
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>{tts_url}</Play>
+  <Redirect>{base_url}/twilio</Redirect>
+</Response>"""
+        
+        logger.info(f"Generated response: {response_text}")
+        logger.info(f"Generated TwiML: {twiml}")
+        return Response(twiml, mimetype="text/xml")
+        
+    except Exception as e:
+        logger.error(f"Error in twilio-handoff: {str(e)}")
+        
+        # Error recovery response
+        base_url = request.url_root.rstrip("/")
+        recovery_text = "I didn't catch that—could you rephrase or tell me what time you'd like to come in?"
+        tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(recovery_text)}"
+        
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>{tts_url}</Play>
+  <Redirect>{base_url}/twilio</Redirect>
+</Response>"""
+        
+        return Response(twiml, mimetype="text/xml")
+
 # Fallback route for any Twilio-related requests
 @app.route('/<path:path>', methods=['GET', 'POST'])
 def fallback_route(path):
     """Handle /twilio route and other fallback routes."""
     if path == 'twilio':
-        # Handle the main Twilio webhook directly
+        # Handle the main Twilio webhook with conversation flow
         logger.info("Twilio main webhook called at /twilio")
         
+        call_sid = request.values.get('CallSid')
+        logger.info(f"Call SID: {call_sid}")
+        
+        # Initialize or get conversation context for this call
+        if call_sid not in conversation_contexts:
+            conversation_contexts[call_sid] = {
+                'messages': [],
+                'state': 'greeting'
+            }
+        
+        # Get greeting text (can be customized based on context)
         greeting_text = request.values.get(
             "text",
-            "Thanks for calling Vanguard Chiropractic. Jessica is now handling this line."
+            "Hi! Thanks for calling Vanguard Chiropractic. This is Jessica. How can I help you today?"
         )
+        
         base_url = request.url_root.rstrip("/")
         tts_url = f"{base_url}/tts?text={urllib.parse.quote_plus(greeting_text)}"
         
+        # Create TwiML with speech gathering
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{tts_url}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto" action="{base_url}/twilio-handoff" method="POST">
+  </Gather>
+  <Say>I didn't hear anything. Let me try again.</Say>
+  <Redirect>{base_url}/twilio</Redirect>
 </Response>"""
         
         logger.info(f"Generated TwiML for /twilio: {twiml}")
