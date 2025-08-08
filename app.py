@@ -141,24 +141,28 @@ def try_booking(name, phone, email, datetime_iso):
 # === Twilio flow ===
 @app.route("/twilio", methods=["GET", "POST"])
 def twilio_entry():
-    """Main Twilio entry point with Jessica greeting and speech gathering."""
+    """Main Twilio entry point with one-time greeting and enhanced speech gathering."""
     base = request.url_root.rstrip("/")
-    call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
+    call_sid = request.values.get("CallSid", "NA")
     session = get_session(call_sid)
     
-    logger.info(f"Twilio entry called - CallSid: {call_sid}")
+    # Check if this is the first time we're greeting this caller
+    first_time = not session.get("greeted")
+    session["greeted"] = True
+    
+    logger.info(f"Twilio entry called - CallSid: {call_sid}, First time: {first_time}")
 
-    # greet only on first turn of the call
-    if not session["history"]:
-        greet = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
-        greet_url = f"{base}/tts?text={urllib.parse.quote_plus(greet)}"
-    else:
-        greet_url = f"{base}/tts?text={urllib.parse.quote_plus('How else can I help you?')}"
+    # Use full greeting only on first call, shorter prompt on subsequent loops
+    greeting = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
+    greet_text = greeting if first_time else "How can I help you?"
+    greet_url = f"{base}/tts?text={urllib.parse.quote_plus(greet_text)}"
 
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{greet_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto" action="/twilio-handoff" method="POST">
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call"
+          action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
   <Redirect>/twilio</Redirect>
@@ -169,29 +173,79 @@ def twilio_entry():
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Handle conversation - DEBUGGING VERSION: Echo back what Twilio heard."""
-    # Add detailed logging
-    app.logger.info(f"/twilio-handoff form: {dict(request.form)}")
-    app.logger.info(f"/twilio-handoff values: {dict(request.values)}")
-    
+    """Handle conversation in continuous loop with enhanced speech recognition."""
     base = request.url_root.rstrip("/")
-    call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
-    heard = request.values.get("SpeechResult", "")
+    call_sid = request.values.get("CallSid", "NA")
+    heard = request.values.get("SpeechResult", "") or ""
+    confidence = request.values.get("Confidence", "")
     
-    logger.info(f"Twilio handoff DEBUG - CallSid: {call_sid}, SpeechResult: '{heard}'")
+    # Enhanced logging with confidence scores
+    app.logger.info({
+        "call": call_sid, 
+        "heard": heard, 
+        "confidence": confidence,
+        "form_data": dict(request.form),
+        "all_values": dict(request.values)
+    })
     
-    # Echo back exactly what Twilio heard
-    if not heard:
-        reply = "I didn't hear anything. Could you try again a bit closer to the phone?"
-    else:
-        reply = f"You said: {heard}. Did I get that right?"
+    logger.info(f"Twilio handoff - CallSid: {call_sid}, Speech: '{heard}', Confidence: {confidence}")
+
+    # Build conversation history with system prompt
+    session = get_session(call_sid)
+    if not any(m["role"] == "system" for m in session["history"]):
+        session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
     
-    logger.info(f"DEBUG reply: {reply}")
+    # Add user input to conversation history
+    if heard:
+        session["history"].append({"role": "user", "content": heard})
+
+    # Get assistant reply (wrap in try so we never stall)
+    try:
+        if heard:
+            # Process with OpenAI for natural conversation
+            reply = openai_chat(session["history"])
+            
+            # Check for booking intent using BOOK: convention
+            if reply.strip().startswith("BOOK:"):
+                try:
+                    data_json = reply.split("BOOK:", 1)[1].strip()
+                    data = json.loads(data_json)
+                    ok, msg = try_booking(
+                        name=data.get("name",""),
+                        phone=data.get("phone",""),
+                        email=data.get("email",""),
+                        datetime_iso=data.get("datetime",""),
+                    )
+                    reply = msg
+                except Exception as e:
+                    logger.error(f"Booking parsing error: {str(e)}")
+                    reply = "I had trouble booking that. Could I confirm your full name, mobile number, email, and a good time?"
+        else:
+            # No speech detected
+            reply = "I didn't catch that. Could you please repeat what you'd like help with?"
+            
+    except Exception as e:
+        app.logger.error(f"OpenAI error: {e}")
+        reply = "I can help with hours, our location, or I can book an appointment. What would you like to do?"
+
+    # Add assistant reply to conversation history
+    session["history"].append({"role": "assistant", "content": reply})
     
-    tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
+    logger.info(f"Generated reply: {reply}")
+    
+    reply_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
+
+    # IMPORTANT: Keep the conversation going with a new Gather in the same response
+    # This prevents bouncing back to /twilio and re-greeting
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>{tts_url}</Play>
+  <Play>{reply_url}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call"
+          action="/twilio-handoff" method="POST">
+    <Pause length="1"/>
+  </Gather>
+  <!-- Fallback only if silence -->
   <Redirect>/twilio</Redirect>
 </Response>"""
     
