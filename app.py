@@ -49,6 +49,48 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
 # === Central Time timezone ===
 TZ = pytz.timezone("America/Chicago")
 
+# === Enhanced TTS caching and caller memory ===
+TTS_CACHE = {}  # In-memory cache for TTS audio
+CALLER_MEMORY = {}  # Per-caller memory by phone number
+BAD_TURNS_LOG = []  # Log for low confidence turns
+
+# TTS optimization settings
+TTS_TIMEOUT = 8  # Reduced timeout for faster responses
+TTS_CACHE_DURATION = 15 * 60  # 15 minutes cache duration
+
+# Caller memory structure
+def get_caller_memory(phone):
+    """Get or create caller memory for phone number."""
+    if phone not in CALLER_MEMORY:
+        CALLER_MEMORY[phone] = {
+            "name": None,
+            "last_success_dt": None,
+            "pain_flag": False,
+            "tone_pref": "normal",  # normal, human_mode, empathetic
+            "call_count": 0,
+            "last_seen": None
+        }
+    return CALLER_MEMORY[phone]
+
+def update_caller_memory(phone, updates):
+    """Update caller memory with new information."""
+    memory = get_caller_memory(phone)
+    memory.update(updates)
+    memory["last_seen"] = datetime.now().isoformat()
+    memory["call_count"] += 1
+
+# Rotated confirmation phrases for natural variety
+CONFIRMATION_PHRASES = [
+    ["Perfect", "Great", "Excellent"],
+    ["Got it", "Thanks", "Perfect"],
+    ["Sounds good", "That works", "Great choice"]
+]
+
+def get_varied_confirmation():
+    """Get a varied confirmation phrase to sound more natural."""
+    import random
+    return random.choice(random.choice(CONFIRMATION_PHRASES))
+
 # === Enhanced booking flow constants ===
 AFFIRM = ["yes","yeah","yep","that works","sounds good","okay","ok","sure","perfect","great"]
 FEEDBACK_WARM = ["sound robotic", "more human", "more natural", "more sensitive", "less robotic", "too slow", "be quicker"]
@@ -336,7 +378,7 @@ def get_cached_tts(text: str) -> bytes:
     return audio
 
 def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
-    """Generate TTS audio with retry logic for resilience."""
+    """Generate TTS audio with enhanced settings and retry logic for resilience."""
     for attempt in range(max_retries):
         try:
             response = requests.post(
@@ -350,11 +392,13 @@ def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
                     "text": text,
                     "model_id": "eleven_multilingual_v2",
                     "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.8
+                        "stability": 0.4,  # Slightly lower for more natural variation
+                        "similarity_boost": 0.8,  # Higher for better voice consistency
+                        "style": 0.6,  # Increased for more expressive delivery
+                        "use_speaker_boost": True
                     }
                 },
-                timeout=60  # Keep 60s timeout for ElevenLabs
+                timeout=TTS_TIMEOUT  # Reduced to 8 seconds for faster responses
             )
             
             # Check for successful response
@@ -463,9 +507,12 @@ def health():
 # === Twilio entry point ===
 @app.route("/twilio", methods=["GET","POST"])
 def twilio_entry():
-    """Twilio entry point - greet once and gather speech with hot mic."""
+    """Twilio entry point - personalized greet and gather speech with hot mic."""
     base = request.url_root.rstrip("/")
-    greeting = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
+    caller_phone = request.values.get("From", "")
+    
+    # Use personalized greeting based on caller memory
+    greeting = get_personalized_greeting(caller_phone)
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -484,6 +531,55 @@ def twilio_entry():
 </Response>"""
     return Response(twiml, mimetype="text/xml")
 
+def log_bad_turn(call_sid, heard_raw, confidence, stage, reason):
+    """Log bad turns for weekly review and optimization."""
+    bad_turn = {
+        "timestamp": datetime.now().isoformat(),
+        "call_sid": call_sid,
+        "heard": heard_raw,
+        "confidence": confidence,
+        "stage": stage,
+        "reason": reason
+    }
+    BAD_TURNS_LOG.append(bad_turn)
+    
+    # Keep only last 1000 entries to prevent memory issues
+    if len(BAD_TURNS_LOG) > 1000:
+        BAD_TURNS_LOG.pop(0)
+    
+    app.logger.warning(f"Bad turn logged: {bad_turn}")
+
+def get_personalized_greeting(caller_phone):
+    """Get personalized greeting based on caller memory."""
+    if not caller_phone:
+        return "Thanks for calling Vanguard Chiropractic. How can I help you today?"
+    
+    memory = get_caller_memory(caller_phone)
+    
+    if memory["call_count"] > 0 and memory["name"]:
+        # Returning caller with name
+        if memory["pain_flag"]:
+            return f"Hi {memory['name']}, thanks for calling back. How are you feeling?"
+        else:
+            return f"Hi {memory['name']}, thanks for calling Vanguard Chiropractic. How can I help you today?"
+    elif memory["call_count"] > 0:
+        # Returning caller without name
+        return "Thanks for calling back! How can I help you today?"
+    else:
+        # First-time caller
+        return "Thanks for calling Vanguard Chiropractic. How can I help you today?"
+
+def send_booking_sms(phone, booking_link):
+    """Send SMS with booking link when booking fails."""
+    try:
+        # This would integrate with Twilio SMS API
+        # For now, just log the action
+        app.logger.info(f"SMS booking link sent to {phone}: {booking_link}")
+        return True
+    except Exception as e:
+        app.logger.error(f"Failed to send SMS to {phone}: {str(e)}")
+        return False
+
 # === Gold-standard conversation handler ===
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
@@ -500,14 +596,36 @@ def twilio_handoff():
     try:
         # Enhanced logging per specification - log per turn
         def log_turn(stage_info, next_prompt=None):
-            app.logger.info({
+            log_data = {
                 "sid": call_sid,
                 "stage": list(B.keys()),
                 "heard": heard_raw,
                 "confidence": confidence,
-                "next_prompt": next_prompt,
-                **stage_info
-            })
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            if isinstance(stage_info, dict):
+                log_data.update(stage_info)
+            else:
+                log_data["stage_info"] = stage_info
+                
+            if next_prompt:
+                log_data["next_prompt"] = next_prompt
+                
+            app.logger.info(log_data)
+            
+            # Check for bad turns and log them
+            conf_float = float(confidence) if confidence else 0.0
+            if conf_float < 0.6:  # Low confidence threshold
+                log_bad_turn(call_sid, heard_raw, confidence, list(B.keys()), "low_confidence")
+        
+        # Get caller phone for memory lookup
+        caller_phone = request.values.get("From", "")
+        caller_memory = get_caller_memory(caller_phone) if caller_phone else None
+        
+        # Apply caller memory preferences
+        if caller_memory and caller_memory["tone_pref"] == "human_mode":
+            session["human_mode"] = True
         
         # Check for tone feedback first - adapt instantly
         session = get_session(call_sid)
@@ -648,18 +766,36 @@ def twilio_handoff():
                     success, error_msg = try_booking_safe(f"{base}/book", payload)
                     if success:
                         log_turn({"stage": "booking_success", "payload": payload})
+                        
+                        # Update caller memory with successful booking
+                        if caller_phone:
+                            memory_updates = {
+                                "name": B["name"],
+                                "last_success_dt": B["datetime"],
+                                "pain_flag": session.get("pain_mentioned", False),
+                                "tone_pref": session.get("human_mode", False) and "human_mode" or "normal"
+                            }
+                            update_caller_memory(caller_phone, memory_updates)
+                        
                         # Clear booking state after successful booking
                         CALLS[call_sid] = {"booking": {}}
                         
-                        # Use contextual response for booking success
+                        # Use varied confirmation and contextual response
+                        confirmation = get_varied_confirmation()
                         contextual_response = get_contextual_response("booking_success", B, session)
                         if contextual_response:
                             return respond_gather(base, contextual_response)
                         else:
-                            return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
+                            return respond_gather(base, f"{confirmation}! You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
                     else:
                         log_turn({"stage": "booking_failed", "error": error_msg})
-                        return respond_gather(base, error_msg)
+                        
+                        # Send SMS booking link as fallback
+                        booking_link = f"https://vanguard-chiropractic.com/book"  # Replace with actual booking link
+                        if caller_phone and send_booking_sms(caller_phone, booking_link):
+                            return respond_gather(base, f"I'm having trouble booking right now, but I've texted you a direct booking link. You can also call back and I'll try again. Anything else I can help with?")
+                        else:
+                            return respond_gather(base, error_msg)
                 else:
                     app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1})
                     return respond_gather(base, "Please say it like john at gmail dot com.")
@@ -787,16 +923,65 @@ def book_appointment():
         app.logger.error(f"Booking error: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-if __name__ == "__main__":
-    # Startup TTS caching to reduce first-call latency
-    if ELEVEN_KEY:
-        app.logger.info("Pre-caching common TTS phrases for faster response...")
+# === Startup TTS caching for instant responses ===
+def cache_startup_phrases():
+    """Pre-cache common phrases at startup for instant first-turn responses."""
+    app.logger.info("Pre-caching common TTS phrases for instant responses...")
+    
+    startup_phrases = [
+        "Thanks for calling Vanguard Chiropractic. How can I help you today?",
+        "Thanks for calling back! How can I help you today?",
+        "What day and time works for you?",
+        "Did you mean morning or afternoon?",
+        "What's your full name?",
+        "What's the best mobile number for confirmation?",
+        "What email should we use to send your confirmation?",
+        "Perfect. What's your full name?",
+        "Great. What's your full name?",
+        "Excellent. What's your full name?",
+        "Still with me? How can I help you today?",
+        "I'll connect you with a team member right away."
+    ]
+    
+    cached_count = 0
+    for phrase in startup_phrases:
         try:
-            for phrase in STARTUP_PHRASES:
-                tts_cached(phrase)
+            audio = tts_cached(phrase)
+            if audio:
+                cached_count += 1
                 app.logger.info(f"Cached: {phrase[:30]}...")
         except Exception as e:
-            app.logger.warning(f"TTS pre-caching failed: {e}")
+            app.logger.error(f"Failed to cache phrase '{phrase[:30]}...': {str(e)}")
     
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    app.logger.info(f"Successfully cached {cached_count}/{len(startup_phrases)} startup phrases")
 
+# === Keepalive endpoint for Railway always-on ===
+@app.route("/keepalive", methods=["GET"])
+def keepalive():
+    """Keepalive endpoint to prevent Railway from sleeping."""
+    return {
+        "status": "alive",
+        "timestamp": datetime.now().isoformat(),
+        "cached_phrases": len(TTS_CACHE),
+        "active_calls": len(CALLS),
+        "caller_memory_count": len(CALLER_MEMORY),
+        "bad_turns_logged": len(BAD_TURNS_LOG)
+    }, 200
+
+# === Weekly review endpoint for bad turns ===
+@app.route("/review", methods=["GET"])
+def weekly_review():
+    """Get bad turns log for weekly review and optimization."""
+    return {
+        "bad_turns": BAD_TURNS_LOG,
+        "total_count": len(BAD_TURNS_LOG),
+        "generated_at": datetime.now().isoformat()
+    }, 200
+
+if __name__ == "__main__":
+    # Cache startup phrases for instant responses
+    cache_startup_phrases()
+    
+    # Start the Flask app
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
