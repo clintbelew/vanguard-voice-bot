@@ -39,6 +39,15 @@ def norm(text: str) -> str:
     """Normalize text for consistent processing."""
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
+def said_yes(txt: str) -> bool:
+    """Check if user said an affirmative response."""
+    t = (txt or "").lower()
+    return any(a in t for a in AFFIRM)
+
+def friendly(dt):
+    """Format datetime in a friendly way."""
+    return dt.strftime("%A at %-I:%M %p")
+
 def parse_dt_central_enhanced(user_text: str, prior_dt: datetime = None) -> tuple[datetime, str]:
     """
     Enhanced datetime parser with prior context support.
@@ -78,9 +87,13 @@ def gather_block(base, prompt_text):
     """Return TwiML that speaks prompt_text and immediately keeps mic open."""
     return f"""
 <Play>{base}/tts?text={urllib.parse.quote_plus(prompt_text)}</Play>
-<Gather input="speech" language="en-US" speechTimeout="auto"
-        enhanced="true" speechModel="phone_call"
-        hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule,name,phone,email"
+<Gather input="speech"
+        language="en-US"
+        speechTimeout="auto"
+        enhanced="true"
+        speechModel="phone_call"
+        actionOnEmptyResult="true"
+        hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,name,phone,email"
         action="/twilio-handoff" method="POST">
   <Pause length="1"/>
 </Gather>
@@ -488,36 +501,68 @@ def twilio_handoff():
         if any(k in heard for k in ["book","schedule","appointment"]) or B.get("intent") == "booking":
             B["intent"] = "booking"
 
-            # 1) datetime
+            # 1) datetime - confirm-once-then-advance flow
             if "datetime" not in B:
-                # Affirmation to last suggestion?
-                if any(a in heard for a in AFFIRM) and B.get("last_suggested_dt"):
-                    B["datetime"] = B["last_suggested_dt"]
-                    reply = f"Great — {B['friendly_dt']}. What's your full name?"
-                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                # Enhanced logging for debugging
+                app.logger.info({"call": call_sid, "state": B, "heard": heard_raw})
+                
+                # 2A) If caller says "yes" and we already have a candidate, lock it in
+                if said_yes(heard_raw) and B.get("candidate_dt"):
+                    # Handle both datetime objects and ISO strings
+                    candidate = B["candidate_dt"]
+                    if isinstance(candidate, str):
+                        # Parse ISO string back to datetime for formatting
+                        candidate_dt = datetime.fromisoformat(candidate.replace('Z', '+00:00'))
+                        if candidate_dt.tzinfo is None:
+                            candidate_dt = TZ.localize(candidate_dt)
+                        else:
+                            candidate_dt = candidate_dt.astimezone(TZ)
+                    else:
+                        candidate_dt = candidate
+                    
+                    B["datetime"] = candidate_dt.isoformat()
+                    B["friendly_dt"] = friendly(candidate_dt)
+                    prompt = f"Great — {B['friendly_dt']}. What's your full name?"
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                     return Response(twiml, mimetype="text/xml")
 
+                # 2B) Try to parse current utterance as a time
+                last_context = B.get("last_context_dt")
                 prior_dt = None
-                if B.get("last_suggested_dt_obj"):
-                    prior_dt = B["last_suggested_dt_obj"]
-
+                if last_context:
+                    try:
+                        prior_dt = datetime.fromisoformat(last_context.replace('Z', '+00:00'))
+                        if prior_dt.tzinfo is None:
+                            prior_dt = TZ.localize(prior_dt)
+                        else:
+                            prior_dt = prior_dt.astimezone(TZ)
+                    except:
+                        prior_dt = None
+                
                 dt, clar = parse_dt_central_enhanced(heard_raw, prior_dt)
                 if clar:
-                    reply = clar
-                elif dt:
-                    # Save dt and friendly string
-                    B["datetime"] = dt.isoformat()
-                    B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
-                    reply = f"Great — {B['friendly_dt']}. What's your full name?"
+                    # Ask a short clarifier (no examples)
+                    prompt = clar
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
+                    return Response(twiml, mimetype="text/xml")
+
+                if dt:
+                    # Store candidate and confirm once
+                    B["candidate_dt"] = dt.isoformat()  # Store as ISO string to avoid serialization issues
+                    B["last_context_dt"] = dt.isoformat()  # Reuse day if caller later says "10 am" only
+                    B["candidate_friendly"] = friendly(dt)
+                    prompt = f"Just to confirm, {B['candidate_friendly']} — is that right?"
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
+                    return Response(twiml, mimetype="text/xml")
+
+                # 2C) Couldn't parse—ask simply (no repeating 'for example' every turn)
+                if B.get("datetime_attempts", 0) == 0:
+                    prompt = "What day and time works for you? For example, Tuesday at 10 A M."
+                    B["datetime_attempts"] = 1
                 else:
-                    reply = "What day and time works for you? For example, Tuesday at 10 A M."
-
-                # Remember last suggestion if we gave one
-                if "friendly_dt" in B:
-                    B["last_suggested_dt"] = B["datetime"]
-                    B["last_suggested_dt_obj"] = dt
-
-                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                    prompt = "What day and time works for you?"
+                
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                 return Response(twiml, mimetype="text/xml")
 
             # 2) name
