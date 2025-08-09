@@ -60,16 +60,61 @@ def said_morning(s):
 def said_afternoon(s): 
     return any(k in (s or "").lower() for k in ["afternoon","evening","pm","p m"])
 
+def normalize_time_tokens(text: str) -> str:
+    """Normalize time tokens to fix AM/PM parsing issues."""
+    t = (text or "").lower()
+    # join spaced letters: "a p m" -> "pm", "a m" -> "am"
+    t = re.sub(r"\b([ap])\s*p\s*m\b", lambda m: f"{m.group(1)}pm", t)
+    t = re.sub(r"\b([ap])\s*m\b", lambda m: f"{m.group(1)}m", t)
+    # fix artifacts like "2a pm" / "2apm" -> "2 pm"
+    t = re.sub(r"(\d)\s*a\s*pm\b", r"\1 pm", t)
+    t = re.sub(r"(\d)\s*p\s*am\b", r"\1 am", t)
+    t = t.replace(" o'clock", "")
+    return t
+
+def normalize_email_tokens(text: str) -> str:
+    """Normalize email speech to standard format."""
+    t = (text or "").lower()
+    # Convert spoken email parts
+    t = t.replace(" at ", "@")
+    t = t.replace(" dot ", ".")
+    t = t.replace(" underscore ", "_")
+    t = t.replace(" dash ", "-")
+    t = t.replace(" hyphen ", "-")
+    # Remove extra spaces
+    t = re.sub(r"\s+", "", t)
+    return t
+
+# Enhanced email normalization for natural speech
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+
+SPOKEN_MAP = {
+    " at ": "@", " dot ": ".", " period ": ".", " underscore ": "_",
+    " dash ": "-", " hyphen ": "-", " plus ": "+", " space ": ""
+}
+
+def normalize_spoken_email(text: str) -> str:
+    """Normalize spoken email like 'john at gmail dot com' to 'john@gmail.com'."""
+    t = " " + (text or "").lower().strip() + " "
+    # collapse spelled letters like "g m a i l" -> "gmail"
+    t = re.sub(r"\b([a-z])\s+(?=[a-z]\b)", r"\1", t)
+    # replace spoken tokens
+    for k, v in SPOKEN_MAP.items():
+        t = t.replace(k, v)
+    t = re.sub(r"\s+", "", t)  # remove remaining spaces
+    return t
+
 def norm(text: str) -> str:
     """Normalize text for consistent processing."""
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 def parse_dt_central(user_text: str, prior_dt=None):
     """
-    Enhanced datetime parser - no AM/PM questions when already specified.
+    Enhanced datetime parser with normalization - no AM/PM questions when already specified.
     Returns (dt: aware datetime | None, clarify: str | None)
     """
-    t = (user_text or "").lower()
+    # Normalize time tokens first
+    t = normalize_time_tokens(user_text or "")
     settings = {"TIMEZONE":"America/Chicago","RETURN_AS_TIMEZONE_AWARE":True,"PREFER_DATES_FROM":"future"}
     dt = dateparser.parse(t, settings=settings) if dateparser else None
 
@@ -80,7 +125,7 @@ def parse_dt_central(user_text: str, prior_dt=None):
             if merged: return merged.astimezone(TZ), None
         return None, "What day and time works for you?"
 
-    # If the user explicitly said am/pm, accept it — no clarification
+    # If the user explicitly said am/pm (after normalization), accept it — no clarification
     if "am" in t or "pm" in t:
         return dt.astimezone(TZ), None
 
@@ -102,9 +147,32 @@ GHL_API_KEY = os.environ.get("GHL_API_KEY")
 GHL_LOCATION_ID = os.environ.get("GHL_LOCATION_ID")
 GHL_CALENDAR_ID = os.environ.get("GHL_CALENDAR_ID")
 
-# === TTS Cache for common phrases ===
+# === TTS Cache for common phrases + startup caching ===
 TTS_CACHE = {}
 CACHE_DURATION = 300  # 5 minutes
+
+# Startup cache for common phrases to reduce latency
+STARTUP_PHRASES = [
+    "Thanks for calling Vanguard Chiropractic. How can I help you today?",
+    "What day and time works for you?",
+    "Did you mean morning or afternoon?",
+    "What's your full name?",
+    "What's the best mobile number for confirmation?",
+    "What email should we use to send your confirmation?",
+    "I didn't catch that. Could you say that again?",
+    "Please spell your email address clearly."
+]
+
+def tts_cached(text: str) -> bytes:
+    """Get cached TTS or generate new one - optimized for startup caching."""
+    cache_key = text.lower().strip()
+    if cache_key in TTS_CACHE:
+        return TTS_CACHE[cache_key]
+    
+    # Generate and cache
+    audio = tts_bytes_with_retry(text)
+    TTS_CACHE[cache_key] = audio
+    return audio
 
 def get_cached_tts(text: str) -> bytes:
     """Get cached TTS or generate new one."""
@@ -232,7 +300,7 @@ def get_session(call_sid):
 
 # === Helper function for TwiML responses ===
 def respond_gather(base_url: str, message: str) -> Response:
-    """Helper to return TwiML response with hot mic gather block."""
+    """Helper to return TwiML response with hot mic gather block - optimized for latency."""
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 <Gather input="speech"
@@ -242,7 +310,7 @@ def respond_gather(base_url: str, message: str) -> Response:
         speechModel="phone_call"
         actionOnEmptyResult="true"
         record="false"
-        hints="monday,tuesday,wednesday,thursday,friday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,name,phone,email"
+        hints="monday,tuesday,wednesday,thursday,friday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,at,dot,underscore,dash,gmail,yahoo,hotmail"
         action="/twilio-handoff" method="POST">
   <Play>{base_url}/tts?text={urllib.parse.quote_plus(message)}</Play>
   <Pause length="0.3"/>
@@ -367,12 +435,25 @@ def twilio_handoff():
                     app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits), "saved_state": B})
                     return respond_gather(base, "Could you share your mobile number digit by digit, including area code?")
 
-            # 4) email → book - accept any valid email format
+            # 4) email → book - accept natural speech like "john at gmail dot com"
             elif "email" not in B:
-                m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", heard_raw, re.I)
+                # Try both raw input and normalized spoken email
+                norm1 = normalize_spoken_email(heard_raw)
+                m = EMAIL_RE.search(heard_raw) or EMAIL_RE.search(norm1)
                 if m:
                     B["email"] = m.group(0)
-                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "saved_state": B})
+                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "saved_state": B})
+                    # Small confirmation before booking
+                    return respond_gather(base, f"Thanks, I have {B['email']}. If that's right, I'll finish your booking.")
+                else:
+                    app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1, "saved_state": B})
+                    return respond_gather(base, "Please say your email, like john at gmail dot com.")
+
+            # 5) booking confirmation - user confirmed email is correct
+            elif "email_confirmed" not in B:
+                if said_yes(heard_raw) or any(word in heard_raw.lower() for word in ["correct", "right", "yes", "that's it"]):
+                    B["email_confirmed"] = True
+                    app.logger.info({"stage": "email_confirmed", "heard": heard_raw, "saved_state": B})
                     # Attempt booking
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
                     try:
@@ -389,8 +470,10 @@ def twilio_handoff():
                         app.logger.error({"stage": "booking_error", "error": str(booking_error), "payload": payload})
                         return respond_gather(base, "I had trouble booking just now. Would you like me to connect you to a team member?")
                 else:
-                    app.logger.info({"stage": "email_invalid", "heard": heard_raw, "saved_state": B})
-                    return respond_gather(base, "Please spell your email address clearly.")
+                    # User wants to correct email
+                    del B["email"]  # Remove email so they can re-enter it
+                    app.logger.info({"stage": "email_correction_requested", "heard": heard_raw, "saved_state": B})
+                    return respond_gather(base, "Please say your email again, like john at gmail dot com.")
 
         # === NON-BOOKING CONVERSATION ===
         else:
@@ -504,5 +587,15 @@ def book_appointment():
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    # Startup TTS caching to reduce first-call latency
+    if ELEVEN_KEY:
+        app.logger.info("Pre-caching common TTS phrases for faster response...")
+        try:
+            for phrase in STARTUP_PHRASES:
+                tts_cached(phrase)
+                app.logger.info(f"Cached: {phrase[:30]}...")
+        except Exception as e:
+            app.logger.warning(f"TTS pre-caching failed: {e}")
+    
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
 
