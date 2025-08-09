@@ -300,7 +300,7 @@ def get_session(call_sid):
 
 # === Helper function for TwiML responses ===
 def respond_gather(base_url: str, message: str) -> Response:
-    """Helper to return TwiML response with hot mic gather block - optimized for latency."""
+    """Gold-standard TwiML: one Play + one Gather, no Redirect."""
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
 <Gather input="speech"
@@ -310,12 +310,11 @@ def respond_gather(base_url: str, message: str) -> Response:
         speechModel="phone_call"
         actionOnEmptyResult="true"
         record="false"
-        hints="monday,tuesday,wednesday,thursday,friday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,at,dot,underscore,dash,gmail,yahoo,hotmail"
+        hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,at,dot,underscore,dash,gmail,yahoo,hotmail"
         action="/twilio-handoff" method="POST">
   <Play>{base_url}/tts?text={urllib.parse.quote_plus(message)}</Play>
   <Pause length="0.3"/>
 </Gather>
-<Redirect>/twilio</Redirect>
 </Response>"""
     return Response(twiml, mimetype="text/xml")
 
@@ -345,116 +344,104 @@ def twilio_entry():
   <Play>{base}/tts?text={urllib.parse.quote_plus(greeting)}</Play>
   <Pause length="0.3"/>
 </Gather>
-<Redirect>/twilio</Redirect>
 </Response>"""
     return Response(twiml, mimetype="text/xml")
 
-# === Enhanced conversation handler ===
+# === Gold-standard conversation handler ===
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Enhanced conversation handler with optimized booking flow."""
+    """Gold-standard conversation handler with no loops or redundant questions."""
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
     heard_raw = request.values.get("SpeechResult", "") or ""
+    confidence = request.values.get("Confidence", "0.0")
     
-    # Lean logging
+    # Enhanced logging per specification
     session = get_session(call_sid)
     B = session.setdefault("booking", {})
-    app.logger.info({"call": call_sid, "stage": list(B.keys()), "heard": heard_raw})
+    
+    # Log per turn: heard, confidence, stage keys, and any slot values
+    app.logger.info({
+        "sid": call_sid, 
+        "stage": list(B.keys()), 
+        "heard": heard_raw, 
+        "confidence": confidence,
+        "values": {k: v for k, v in B.items() if k in ["datetime", "name", "phone", "email"]}
+    })
     
     try:
-        # Detect booking intent
-        if any(k in heard_raw.lower() for k in ["book","schedule","appointment"]) or B.get("intent") == "booking":
+        # Detect booking intent from phrases
+        booking_keywords = ["book", "schedule", "appointment", "come in", "new patient", "back hurts", "pain", "visit"]
+        if any(k in heard_raw.lower() for k in booking_keywords) or B.get("intent") == "booking":
             B["intent"] = "booking"
 
-            # === BOOKING STATE MACHINE ===
+            # === GOLD-STANDARD BOOKING FLOW ===
             
-            # 1) datetime - candidate → confirm → set → advance flow
+            # 1) Date & time capture - NO AM/PM questions if already specified
             if "datetime" not in B:
                 
-                # A) AM/PM clarification response to a prior candidate
-                if B.get("awaiting_ampm") and B.get("candidate_dt"):
-                    cand = B["candidate_dt"]
-                    if 1 <= cand.hour <= 11:
-                        if said_morning(heard_raw):
-                            pass  # keep AM
-                        elif said_afternoon(heard_raw):
-                            cand = cand.replace(hour=(cand.hour % 12) + 12)
-                        else:
-                            return respond_gather(base, "Did you mean morning or afternoon?")
-
-                    B["awaiting_ampm"] = False
-                    B["datetime"] = cand.isoformat()
-                    B["friendly_dt"] = cand.strftime("%A at %-I:%M %p")
-                    return respond_gather(base, f"Great — {B['friendly_dt']}. What's your full name?")
-
-                # B) "Yes" to previously proposed candidate
+                # A) "Yes" confirmation to proposed time
                 if said_yes(heard_raw) and B.get("candidate_dt"):
                     dt = B["candidate_dt"]
                     B["datetime"] = dt.isoformat()
                     B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
-                    return respond_gather(base, f"Great — {B['friendly_dt']}. What's your full name?")
+                    app.logger.info({"stage": "datetime_confirmed", "heard": heard_raw, "datetime": B["datetime"]})
+                    return respond_gather(base, f"Great. What's your full name?")
 
-                # C) Parse new utterance
+                # B) Parse new time utterance with normalization
                 dt, clar = parse_dt_central(heard_raw, B.get("last_context_dt"))
-                if clar:
-                    # We're asking AM/PM only when truly ambiguous; keep it short.
-                    if not B.get("candidate_dt") and B.get("last_context_dt"):
-                        B["candidate_dt"] = B["last_context_dt"]
+                
+                # If clarification needed (only for truly ambiguous times)
+                if clar and not ("am" in heard_raw.lower() or "pm" in heard_raw.lower()):
+                    B["candidate_dt"] = B.get("last_context_dt")
                     B["awaiting_ampm"] = True
+                    app.logger.info({"stage": "datetime_clarification", "heard": heard_raw, "clarification": clar})
                     return respond_gather(base, clar)
 
+                # If we got a valid datetime, confirm it
                 if dt:
                     B["candidate_dt"] = dt
                     B["last_context_dt"] = dt
                     B["candidate_friendly"] = dt.strftime("%A at %-I:%M %p")
+                    app.logger.info({"stage": "datetime_candidate", "heard": heard_raw, "candidate": B["candidate_friendly"]})
                     return respond_gather(base, f"Just to confirm, {B['candidate_friendly']} — is that right?")
 
-                # D) Couldn't parse yet — simple ask (no repeated examples)
+                # Couldn't parse - simple ask
+                app.logger.info({"stage": "datetime_request", "heard": heard_raw})
                 return respond_gather(base, "What day and time works for you?")
 
-            # 2) name collection - accept any non-empty input as name
+            # 2) Name capture - accept any non-empty utterance
             elif "name" not in B:
                 cleaned = heard_raw.strip()
                 if cleaned:
                     B["name"] = cleaned
-                    app.logger.info({"stage": "name_captured", "heard": heard_raw, "saved_state": B})
-                    return respond_gather(base, f"Thanks {B['name']}. What's the best mobile number for confirmation? Please say it digit by digit.")
+                    app.logger.info({"stage": "name_captured", "heard": heard_raw, "name": B["name"]})
+                    return respond_gather(base, f"Thanks, {B['name']}. What's the best mobile number for confirmation? Please say it digit by digit.")
                 else:
-                    app.logger.info({"stage": "name_empty", "heard": heard_raw, "saved_state": B})
+                    app.logger.info({"stage": "name_empty", "heard": heard_raw})
                     return respond_gather(base, "I didn't catch your name. Could you say it again?")
 
-            # 3) phone collection - accept any sequence of 10+ digits
+            # 3) Phone capture - extract 10+ digits
             elif "phone" not in B:
                 digits = re.sub(r"\D", "", heard_raw)
                 if len(digits) >= 10:
                     B["phone"] = f"+1{digits[-10:]}"
-                    app.logger.info({"stage": "phone_captured", "heard": heard_raw, "saved_state": B})
-                    return respond_gather(base, "Thank you. What email should we use to send your confirmation?")
+                    app.logger.info({"stage": "phone_captured", "heard": heard_raw, "phone": B["phone"]})
+                    return respond_gather(base, "Got it. And what email should we send your confirmation to?")
                 else:
-                    app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits), "saved_state": B})
-                    return respond_gather(base, "Could you share your mobile number digit by digit, including area code?")
+                    app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits)})
+                    return respond_gather(base, "Please say the 10-digit mobile number including area code.")
 
-            # 4) email → book - accept natural speech like "john at gmail dot com"
+            # 4) Email capture with normalization
             elif "email" not in B:
-                # Try both raw input and normalized spoken email
+                # Normalize spoken email first
                 norm1 = normalize_spoken_email(heard_raw)
                 m = EMAIL_RE.search(heard_raw) or EMAIL_RE.search(norm1)
                 if m:
                     B["email"] = m.group(0)
-                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "saved_state": B})
-                    # Small confirmation before booking
-                    return respond_gather(base, f"Thanks, I have {B['email']}. If that's right, I'll finish your booking.")
-                else:
-                    app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1, "saved_state": B})
-                    return respond_gather(base, "Please say your email, like john at gmail dot com.")
-
-            # 5) booking confirmation - user confirmed email is correct
-            elif "email_confirmed" not in B:
-                if said_yes(heard_raw) or any(word in heard_raw.lower() for word in ["correct", "right", "yes", "that's it"]):
-                    B["email_confirmed"] = True
-                    app.logger.info({"stage": "email_confirmed", "heard": heard_raw, "saved_state": B})
-                    # Attempt booking
+                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "email": B["email"]})
+                    
+                    # Proceed directly to booking
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
                     try:
                         r = requests.post(f"{base}/book", json=payload, timeout=60)
@@ -462,40 +449,49 @@ def twilio_handoff():
                             app.logger.info({"stage": "booking_success", "payload": payload})
                             # Clear booking state after successful booking
                             CALLS[call_sid] = {"booking": {}}
-                            return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}.")
+                            return respond_gather(base, f"Perfect. You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
                         else:
                             app.logger.info({"stage": "booking_failed", "status_code": r.status_code, "payload": payload})
-                            return respond_gather(base, "I couldn't complete the booking just now. Would you like me to try a different time?")
+                            return respond_gather(base, "I'm having trouble booking at the moment. Would you like a team member to call you back, or try a different time?")
                     except Exception as booking_error:
                         app.logger.error({"stage": "booking_error", "error": str(booking_error), "payload": payload})
-                        return respond_gather(base, "I had trouble booking just now. Would you like me to connect you to a team member?")
+                        return respond_gather(base, "I'm having trouble booking at the moment. Would you like a team member to call you back, or try a different time?")
                 else:
-                    # User wants to correct email
-                    del B["email"]  # Remove email so they can re-enter it
-                    app.logger.info({"stage": "email_correction_requested", "heard": heard_raw, "saved_state": B})
-                    return respond_gather(base, "Please say your email again, like john at gmail dot com.")
+                    app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1})
+                    return respond_gather(base, "Please say it like john at gmail dot com.")
+
+            # All booking info collected - this shouldn't happen but handle gracefully
+            else:
+                app.logger.info({"stage": "booking_complete_fallback", "heard": heard_raw, "booking_state": B})
+                return respond_gather(base, "Your appointment is confirmed. Is there anything else I can help you with?")
 
         # === NON-BOOKING CONVERSATION ===
         else:
             if not heard_raw:
-                return respond_gather(base, "I didn't hear that clearly. How can I help you today?")
+                app.logger.info({"stage": "empty_speech", "heard": heard_raw})
+                return respond_gather(base, "Sorry, I didn't catch that — could you say it again?")
             
-            # Simple responses for common queries
+            # Natural follow-ups / FAQs (short, friendly)
             heard_lower = heard_raw.lower()
             
             if any(word in heard_lower for word in ["hours", "open", "time"]):
-                return respond_gather(base, "We're open Monday through Friday 9 to 6, and Saturday 9 to 1. Would you like to schedule a visit?")
+                app.logger.info({"stage": "hours_inquiry", "heard": heard_raw})
+                return respond_gather(base, "We're open Monday through Friday 9 to 6, and Saturday 9 to 1. Would you like me to get you scheduled?")
             
             elif any(word in heard_lower for word in ["location", "address", "where"]):
-                return respond_gather(base, "We're located in downtown Austin. Would you like me to book you an appointment?")
+                app.logger.info({"stage": "location_inquiry", "heard": heard_raw})
+                return respond_gather(base, "We're located in downtown Austin. Would you like me to get you scheduled?")
             
-            elif any(word in heard_lower for word in ["price", "cost", "how much"]):
+            elif any(word in heard_lower for word in ["price", "cost", "how much", "insurance"]):
+                app.logger.info({"stage": "pricing_inquiry", "heard": heard_raw})
                 return respond_gather(base, "We have various options and work with insurance. Would you like to schedule a consultation?")
             
-            elif any(word in heard_lower for word in ["pain", "hurt", "back", "neck"]):
-                return respond_gather(base, "I'm sorry you're experiencing pain. Let's get you scheduled so the doctor can help. What day works for you?")
+            elif any(word in heard_lower for word in ["pain", "hurt", "back", "neck", "sore"]):
+                app.logger.info({"stage": "pain_inquiry", "heard": heard_raw})
+                return respond_gather(base, "I'm sorry you're experiencing pain. Let's get you scheduled so the doctor can help. What day and time works for you?")
             
             else:
+                app.logger.info({"stage": "general_inquiry", "heard": heard_raw})
                 return respond_gather(base, "I can help with hours, location, services, or I can book an appointment. What would you like?")
 
     except Exception as e:
