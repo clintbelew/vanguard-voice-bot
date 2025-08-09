@@ -10,16 +10,32 @@ import urllib.parse
 import time
 import re
 from flask import Flask, request, jsonify, send_file, Response, session
-from dotenv import load_dotenv
-from twilio.twiml.voice_response import VoiceResponse, Gather
 import pytz
 from datetime import datetime, timedelta
-import dateparser
-from dateutil import parser as dateutil_parser
-import openai
 
-# Load environment variables
-load_dotenv()
+# Optional imports for enhanced functionality
+try:
+    import dateparser
+except ImportError:
+    dateparser = None
+
+try:
+    from dateutil import parser as dateutil_parser
+except ImportError:
+    dateutil_parser = None
+
+try:
+    import openai
+except ImportError:
+    openai = None
+
+# Load environment variables (optional)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # dotenv not available, environment variables should be set by Railway
+    pass
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,8 +142,9 @@ GHL_CALENDAR_ID = os.environ.get("GHL_CALENDAR_ID")
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24))
 
-# Initialize OpenAI client using simplified legacy method
-openai.api_key = os.getenv('OPENAI_API_KEY')
+# Initialize OpenAI client using simplified legacy method (if available)
+if openai:
+    openai.api_key = os.getenv('OPENAI_API_KEY')
 
 # Environment variables
 ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
@@ -397,15 +414,15 @@ def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
             if response.status_code == 200:
                 return response.content
             elif response.status_code >= 500 and attempt < max_retries - 1:
-                       app.logger.warning(f"ElevenLabs 5xx error (attempt {attempt + 1}), retrying...")
+                app.logger.warning(f"ElevenLabs 5xx error (attempt {attempt + 1}), retrying...")
                 time.sleep(0.5)
                 continue
-            elif r.status_code == 429:
+            elif response.status_code == 429:
                 # Rate limited, wait longer
                 time.sleep(1.0)
                 continue
             else:
-                r.raise_for_status()
+                response.raise_for_status()
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
                 app.logger.warning(f"ElevenLabs timeout (attempt {attempt + 1}), retrying...")
@@ -415,7 +432,10 @@ def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
                 raise
         except requests.exceptions.RequestException as e:
             if attempt < max_retries - 1:
-                app.logger.warning(f"ElevenLabs request error (attempt {attempt + 1}): {e}, retrying...")          else:
+                app.logger.warning(f"ElevenLabs request error (attempt {attempt + 1}): {e}, retrying...")
+                time.sleep(0.5)
+                continue
+            else:
                 raise
     
     # If we get here, all retries failed
@@ -463,7 +483,7 @@ def openai_chat(messages):
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-           app.logger.error(f"OpenAI API error: {str(e)}")
+        app.logger.error(f"OpenAI API error: {str(e)}")
         return "I can help with hours, location, services, or I can book an appointment. What would you like?"
 
 def try_booking(name: str, phone: str, email: str, datetime_iso: str) -> str:
@@ -477,7 +497,7 @@ def try_booking(name: str, phone: str, email: str, datetime_iso: str) -> str:
             return "I had trouble booking that time. Would you like to try a different slot?"
     except Exception as e:
         app.logger.error(f"Booking error: {str(e)}")
-        return "I had trouble with the booking system. Would you like me to connect you to a team member?""
+        return "I had trouble with the booking system. Would you like me to connect you to a team member?"
 
 # === Twilio flow ===
 @app.route("/twilio", methods=["GET","POST"])
