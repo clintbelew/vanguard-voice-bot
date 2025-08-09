@@ -345,41 +345,51 @@ def twilio_handoff():
                 # D) Couldn't parse yet — simple ask (no repeated examples)
                 return respond_gather(base, "What day and time works for you?")
 
-            # 2) name collection
+            # 2) name collection - accept any non-empty input as name
             elif "name" not in B:
-                m = re.search(r"(my name is|this is)\s+([a-zA-Z][a-zA-Z ,.'-]+)$", heard_raw, re.I)
-                if m:
-                    B["name"] = m.group(2).strip()
-                    return respond_gather(base, "Thanks. What's the best mobile number for confirmation? Please say it digit by digit.")
+                cleaned = heard_raw.strip()
+                if cleaned:
+                    B["name"] = cleaned
+                    app.logger.info({"stage": "name_captured", "heard": heard_raw, "saved_state": B})
+                    return respond_gather(base, f"Thanks {B['name']}. What's the best mobile number for confirmation? Please say it digit by digit.")
                 else:
-                    return respond_gather(base, "Got it. May I have your full name?")
+                    app.logger.info({"stage": "name_empty", "heard": heard_raw, "saved_state": B})
+                    return respond_gather(base, "I didn't catch your name. Could you say it again?")
 
-            # 3) phone collection
+            # 3) phone collection - accept any sequence of 10+ digits
             elif "phone" not in B:
                 digits = re.sub(r"\D", "", heard_raw)
                 if len(digits) >= 10:
                     B["phone"] = f"+1{digits[-10:]}"
+                    app.logger.info({"stage": "phone_captured", "heard": heard_raw, "saved_state": B})
                     return respond_gather(base, "Thank you. What email should we use to send your confirmation?")
                 else:
+                    app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits), "saved_state": B})
                     return respond_gather(base, "Could you share your mobile number digit by digit, including area code?")
 
-            # 4) email → book
+            # 4) email → book - accept any valid email format
             elif "email" not in B:
                 m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", heard_raw, re.I)
                 if m:
                     B["email"] = m.group(0)
+                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "saved_state": B})
+                    # Attempt booking
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
                     try:
                         r = requests.post(f"{base}/book", json=payload, timeout=60)
                         if r.status_code == 200:
+                            app.logger.info({"stage": "booking_success", "payload": payload})
                             # Clear booking state after successful booking
                             CALLS[call_sid] = {"booking": {}}
                             return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}.")
                         else:
+                            app.logger.info({"stage": "booking_failed", "status_code": r.status_code, "payload": payload})
                             return respond_gather(base, "I couldn't complete the booking just now. Would you like me to try a different time?")
-                    except Exception:
+                    except Exception as booking_error:
+                        app.logger.error({"stage": "booking_error", "error": str(booking_error), "payload": payload})
                         return respond_gather(base, "I had trouble booking just now. Would you like me to connect you to a team member?")
                 else:
+                    app.logger.info({"stage": "email_invalid", "heard": heard_raw, "saved_state": B})
                     return respond_gather(base, "Please spell your email address clearly.")
 
         # === NON-BOOKING CONVERSATION ===
