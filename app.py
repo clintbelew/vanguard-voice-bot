@@ -102,6 +102,7 @@ def gather_block(base, prompt_text):
         enhanced="true"
         speechModel="phone_call"
         actionOnEmptyResult="true"
+        record="false"
         hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,afternoon,morning,next week,appointment,book,schedule,name,phone,email"
         action="/twilio-handoff" method="POST">
   <Pause length="1"/>
@@ -333,25 +334,40 @@ def tts_bytes(text: str) -> bytes:
 # TTS endpoint for Twilio
 @app.route("/tts", methods=["GET"])
 def tts_get():
-    """Resilient TTS endpoint - ALWAYS returns valid audio."""
+    """Resilient TTS endpoint - ALWAYS returns valid audio with proper headers."""
     text = request.args.get("text", "Thanks for calling Vanguard. How can I help you today?")
     
     try:
         # Try ElevenLabs TTS with retry logic
         audio = tts_bytes_with_retry(text)
         app.logger.info(f"ElevenLabs TTS successful for text: {text[:50]}...")
-        return Response(audio, mimetype="audio/mpeg")
+        return Response(audio, headers={
+            "Content-Type": "audio/mpeg",
+            "Content-Length": str(len(audio)),
+            "Cache-Control": "public, max-age=300",
+            "Content-Disposition": "inline"
+        })
     except Exception as e:
         app.logger.error(f"/tts error: {e}", exc_info=True)
         app.logger.error(f"TTS failed for text: {text[:50]}..., using fallback audio")
         
         # Return fallback audio file so Twilio doesn't get 5xx
         try:
-            return send_file("static/fallback.mp3", mimetype="audio/mpeg")
+            with open("static/fallback.mp3", "rb") as f:
+                fallback_audio = f.read()
+            return Response(fallback_audio, headers={
+                "Content-Type": "audio/mpeg",
+                "Content-Length": str(len(fallback_audio)),
+                "Cache-Control": "public, max-age=300",
+                "Content-Disposition": "inline"
+            })
         except Exception as fallback_error:
             app.logger.error(f"Fallback audio error: {fallback_error}", exc_info=True)
             # Last resort: return empty audio response
-            return Response(b"", mimetype="audio/mpeg", status=200)
+            return Response(b"", headers={
+                "Content-Type": "audio/mpeg",
+                "Content-Length": "0"
+            }, status=200)
 
 def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
     """
@@ -466,26 +482,33 @@ def try_booking(name: str, phone: str, email: str, datetime_iso: str) -> str:
 # === Twilio flow ===
 @app.route("/twilio", methods=["GET","POST"])
 def twilio_entry():
-    """Enhanced Twilio entry point with improved greeting logic."""
+    """Twilio entry point - greet once and gather speech."""
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
-    session = get_session(call_sid)
-
-    if not session.get("greeted"):
-        session["greeted"] = True
-        greet = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    
+    # Simple greeting - no complex state management
+    greet = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
+    
+    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  {gather_block(base, greet)}
+  <Play>{base}/tts?text={urllib.parse.quote_plus(greet)}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call" actionOnEmptyResult="true"
+          record="false"
+          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
+          action="/twilio-handoff" method="POST">
+    <Pause length="1"/>
+  </Gather>
+  <!-- Fallback only on silence -->
+  <Play>{base}/tts?text={urllib.parse.quote_plus("I didn't hear anything. How can I help you today?")}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call" actionOnEmptyResult="true"
+          record="false"
+          action="/twilio-handoff" method="POST">
+    <Pause length="1"/>
+  </Gather>
 </Response>"""
-        return Response(twiml, mimetype="text/xml")
-    else:
-        # Brief reprompt without re-greeting
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  {gather_block(base, "How else can I help you?")}
-</Response>"""
-        return Response(twiml, mimetype="text/xml")
+    return Response(twiml, mimetype="text/xml")
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
@@ -718,33 +741,6 @@ def health_check():
     print("Health check endpoint called")
     app.logger.info("Health check endpoint called")
     return jsonify({"status": "ok"}), 200
-
-# Voice endpoint for API testing
-@app.route('/voice', methods=['POST'])
-def voice_endpoint():
-    """Voice endpoint for API testing with ElevenLabs integration."""
-    try:
-        data = request.get_json()
-        if not data or 'text' not in data:
-            return jsonify({"error": "Missing 'text' field in request"}), 400
-        
-        text = data['text']
-        app.logger.info(f"Voice endpoint called with text: {text}")
-        
-        # Generate audio using ElevenLabs
-        audio_bytes = tts_bytes(text)
-        
-        # Create a temporary file to store the audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_file:
-            temp_file.write(audio_bytes)
-            temp_path = temp_file.name
-        
-        # Return the audio file
-        return send_file(temp_path, mimetype='audio/mpeg', as_attachment=True, download_name='voice.mp3')
-        
-    except Exception as e:
-        app.logger.error(f"Error in voice endpoint: {str(e)}")
-        return jsonify({"error": "Failed to generate voice"}), 500
 
 # Book appointment endpoint
 @app.route('/book', methods=['POST'])
