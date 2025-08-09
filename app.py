@@ -2,15 +2,16 @@ import os
 import logging
 import requests
 import tempfile
-import io
-import base64
-import json
-import sys
-import urllib.parse
-import time
+import os
 import re
-from flask import Flask, request, jsonify, send_file, Response, session
+import time
+import random
+import urllib.parse
+from datetime import datetime
 import pytz
+import requests
+from flask import Flask, request, Response
+import dateparser
 from datetime import datetime, timedelta
 
 # Optional imports for enhanced functionality
@@ -50,6 +51,13 @@ TZ = pytz.timezone("America/Chicago")
 
 # === Enhanced booking flow constants ===
 AFFIRM = ["yes","yeah","yep","that works","sounds good","okay","ok","sure","perfect","great"]
+FEEDBACK_WARM = ["sound robotic", "more human", "more natural", "more sensitive", "less robotic", "too slow", "be quicker"]
+
+# Emotional intelligence detection
+URGENCY_KEYWORDS = ["severe pain", "emergency", "urgent", "asap", "right away", "can't wait", "killing me", "unbearable"]
+FRUSTRATION_KEYWORDS = ["frustrated", "annoying", "stupid", "not working", "terrible", "awful", "hate this"]
+CONFUSION_KEYWORDS = ["confused", "don't understand", "what", "huh", "repeat", "say again"]
+PAIN_KEYWORDS = ["pain", "hurt", "ache", "sore", "injury", "accident", "can't move"]
 
 def said_yes(s): 
     return any(a in (s or "").lower() for a in AFFIRM)
@@ -64,6 +72,63 @@ def said_natural_confirmation(s):
     """Accept natural confirmations like 'yes', 'that works', 'sounds good'."""
     confirmations = ["yes", "yep", "sure", "that works", "sounds good", "perfect", "great", "okay", "ok"]
     return any(conf in (s or "").lower() for conf in confirmations)
+
+def check_feedback(text, S):
+    """Detect feedback phrases and switch to human_mode for more natural responses."""
+    t = (text or "").lower()
+    if any(k in t for k in FEEDBACK_WARM):
+        S["human_mode"] = True
+        return "Got it — I'll keep it natural and quick. Let's get you taken care of."
+    return None
+
+def detect_emotional_state(text, S):
+    """Advanced emotional intelligence - detect urgency, frustration, confusion, pain."""
+    t = (text or "").lower()
+    
+    # Urgency detection - prioritize immediate care
+    if any(k in t for k in URGENCY_KEYWORDS):
+        S["urgency"] = True
+        S["pain_mentioned"] = True
+        return "I understand this is urgent. Let me get you the earliest available appointment."
+    
+    # Pain detection - show empathy
+    if any(k in t for k in PAIN_KEYWORDS):
+        S["pain_mentioned"] = True
+        return "I hear you're in pain. Let's get you scheduled right away."
+    
+    # Frustration detection - apologize and offer human help
+    if any(k in t for k in FRUSTRATION_KEYWORDS):
+        S["frustrated"] = True
+        return "I'm sorry this has been frustrating. Let me help you quickly, or I can connect you to a team member."
+    
+    # Confusion detection - slow down and simplify
+    if any(k in t for k in CONFUSION_KEYWORDS):
+        S["confused"] = True
+        return "No problem, let me explain that more clearly."
+    
+    return None
+
+def get_contextual_response(stage, B, S):
+    """Generate contextual responses based on conversation history and emotional state."""
+    human_mode = S.get("human_mode", False)
+    urgency = S.get("urgency", False)
+    pain_mentioned = S.get("pain_mentioned", False)
+    
+    if stage == "datetime_confirmed" and pain_mentioned:
+        return f"Perfect. We'll get you some relief on {B['friendly_dt']}. What's your name?"
+    elif stage == "booking_success" and pain_mentioned:
+        return f"You're all set for {B['friendly_dt']}. We'll help you feel better soon. Confirmation will be texted to {B['phone']}."
+    elif human_mode:
+        # Shorter, more natural responses in human mode
+        responses = {
+            "datetime_request": ["What day works for you?", "When would you like to come in?"],
+            "name_request": ["And your name?", "What's your name?"],
+            "phone_request": ["Phone number?", "What's your number?"],
+            "email_request": ["Email address?", "What's your email?"]
+        }
+        return random.choice(responses.get(stage, ["How can I help?"]))
+    
+    return None
 
 def normalize_time_tokens(text: str) -> str:
     """Normalize time tokens to fix AM/PM parsing issues per gold standard spec."""
@@ -110,6 +175,18 @@ def normalize_spoken_email(text: str) -> str:
 def norm(text: str) -> str:
     """Normalize text for consistent processing."""
     return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+def try_booking_safe(booking_url, payload):
+    """Safe booking with timeout handling to eliminate booking timeouts."""
+    try:
+        r = requests.post(booking_url, json=payload, timeout=8)
+        if r.status_code == 200:
+            return True, None
+        return False, "I couldn't complete the booking just now. Would you like me to try a different time?"
+    except requests.Timeout:
+        return False, "It's taking a little long to confirm. Want me to try another time or have a team member text you?"
+    except Exception:
+        return False, "I hit a snag booking. Would you like me to connect you to a team member?"
 
 def parse_dt_central(user_text: str, prior_dt=None):
     """
@@ -375,6 +452,19 @@ def twilio_handoff():
                 **stage_info
             })
         
+        # Check for tone feedback first - adapt instantly
+        session = get_session(call_sid)
+        feedback_response = check_feedback(heard_raw, session)
+        if feedback_response:
+            log_turn({"feedback_detected": True, "human_mode": True})
+            return respond_gather(base, feedback_response)
+        
+        # Check for emotional states - respond with empathy
+        emotional_response = detect_emotional_state(heard_raw, session)
+        if emotional_response:
+            log_turn({"emotional_state_detected": True, "response": emotional_response})
+            return respond_gather(base, emotional_response)
+        
         # Detect booking intent from phrases
         booking_keywords = ["book", "schedule", "appointment", "come in", "new patient", "back hurts", "pain", "visit"]
         if any(k in heard_raw.lower() for k in booking_keywords) or B.get("intent") == "booking":
@@ -412,8 +502,14 @@ def twilio_handoff():
                     dt = B["candidate_dt"]
                     B["datetime"] = dt.isoformat()
                     B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
-                    app.logger.info({"stage": "datetime_confirmed", "heard": heard_raw, "datetime": B["datetime"]})
-                    return respond_gather(base, f"Great. What's your full name?")
+                    log_turn({"stage": "datetime_confirmed", "heard": heard_raw, "datetime": B["datetime"]})
+                    
+                    # Use contextual response based on conversation history
+                    contextual_response = get_contextual_response("datetime_confirmed", B, session)
+                    if contextual_response:
+                        return respond_gather(base, contextual_response)
+                    else:
+                        return respond_gather(base, f"Great. What's your full name?")
 
                 # C) Parse new time utterance with normalization
                 dt, clar = parse_dt_central(heard_raw, B.get("last_context_dt"))
@@ -468,21 +564,23 @@ def twilio_handoff():
                     B["email"] = m.group(0)
                     app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "email": B["email"]})
                     
-                    # Proceed directly to booking per specification
+                    # Proceed directly to booking per specification with timeout handling
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
-                    try:
-                        r = requests.post(f"{base}/book", json=payload, timeout=60)
-                        if r.status_code == 200:
-                            app.logger.info({"stage": "booking_success", "payload": payload})
-                            # Clear booking state after successful booking
-                            CALLS[call_sid] = {"booking": {}}
-                            return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
+                    success, error_msg = try_booking_safe(f"{base}/book", payload)
+                    if success:
+                        log_turn({"stage": "booking_success", "payload": payload})
+                        # Clear booking state after successful booking
+                        CALLS[call_sid] = {"booking": {}}
+                        
+                        # Use contextual response for booking success
+                        contextual_response = get_contextual_response("booking_success", B, session)
+                        if contextual_response:
+                            return respond_gather(base, contextual_response)
                         else:
-                            app.logger.info({"stage": "booking_failed", "status_code": r.status_code, "payload": payload})
-                            return respond_gather(base, "I'm having trouble booking right now. Would you like me to try a different time or have a team member call you?")
-                    except Exception as booking_error:
-                        app.logger.error({"stage": "booking_error", "error": str(booking_error), "payload": payload})
-                        return respond_gather(base, "I'm having trouble booking right now. Would you like me to try a different time or have a team member call you?")
+                            return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
+                    else:
+                        log_turn({"stage": "booking_failed", "error": error_msg})
+                        return respond_gather(base, error_msg)
                 else:
                     app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1})
                     return respond_gather(base, "Please say it like john at gmail dot com.")
