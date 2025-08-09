@@ -305,8 +305,8 @@ def match_chiropractic_response(user_input: str) -> str|None:
     for response in CHIROPRACTIC_RESPONSES["responses"]:
         for trigger in response["triggers"]:
             if trigger.lower() in user_lower:
-                logger.info(f"Matched trigger '{trigger}' for response ID '{response['id']}'")
-                return response["reply"]
+                app.logger.info(f"Matched trigger '{trigger}' for response ID '{response['id']}'")
+                return response["response"]
     
     return None
 
@@ -339,12 +339,11 @@ def tts_get():
     try:
         # Try ElevenLabs TTS with retry logic
         audio = tts_bytes_with_retry(text)
-        logger.info(f"ElevenLabs TTS successful for text: {text[:50]}...")
+        app.logger.info(f"ElevenLabs TTS successful for text: {text[:50]}...")
         return Response(audio, mimetype="audio/mpeg")
-        
     except Exception as e:
         app.logger.error(f"/tts error: {e}", exc_info=True)
-        logger.error(f"TTS failed for text: {text[:50]}..., using fallback audio")
+        app.logger.error(f"TTS failed for text: {text[:50]}..., using fallback audio")
         
         # Return fallback audio file so Twilio doesn't get 5xx
         try:
@@ -382,25 +381,25 @@ def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
             if response.status_code == 200:
                 return response.content
             elif response.status_code >= 500 and attempt < max_retries - 1:
-                # Retry on 5xx errors
-                logger.warning(f"ElevenLabs 5xx error (attempt {attempt + 1}), retrying...")
-                time.sleep(0.5)  # Brief delay before retry
+                       app.logger.warning(f"ElevenLabs 5xx error (attempt {attempt + 1}), retrying...")
+                time.sleep(0.5)
+                continue
+            elif r.status_code == 429:
+                # Rate limited, wait longer
+                time.sleep(1.0)
                 continue
             else:
-                # Don't retry on 4xx errors or final attempt
-                response.raise_for_status()
-                
+                r.raise_for_status()
         except requests.exceptions.Timeout:
             if attempt < max_retries - 1:
-                logger.warning(f"ElevenLabs timeout (attempt {attempt + 1}), retrying...")
+                app.logger.warning(f"ElevenLabs timeout (attempt {attempt + 1}), retrying...")
+                time.sleep(0.5)
                 continue
             else:
                 raise
         except requests.exceptions.RequestException as e:
             if attempt < max_retries - 1:
-                logger.warning(f"ElevenLabs request error (attempt {attempt + 1}): {e}, retrying...")
-                continue
-            else:
+                app.logger.warning(f"ElevenLabs request error (attempt {attempt + 1}): {e}, retrying...")          else:
                 raise
     
     # If we get here, all retries failed
@@ -448,23 +447,21 @@ def openai_chat(messages):
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.error(f"OpenAI API error: {str(e)}")
-        return "I didn't catch that—could you rephrase or tell me what time you'd like to come in?"
+           app.logger.error(f"OpenAI API error: {str(e)}")
+        return "I can help with hours, location, services, or I can book an appointment. What would you like?"
 
-# === Booking tool: calls existing /book ===
-def try_booking(name, phone, email, datetime_iso):
-    """
-    Returns (ok: bool, message: str)
-    """
+def try_booking(name: str, phone: str, email: str, datetime_iso: str) -> str:
+    """Attempt to book appointment via /book endpoint."""
     try:
         payload = {"name": name, "phone": phone, "email": email, "datetime": datetime_iso}
-        r = requests.post(f"{request.url_root.rstrip('/')}/book", json=payload, timeout=60)
+        r = requests.post("http://localhost:5000/book", json=payload, timeout=30)
         if r.status_code == 200:
-            return True, "You're all set. I've booked that appointment."
-        return False, "I couldn't complete the booking just now. Would you like me to try a different time?"
+            return f"Perfect! You're booked. We'll text confirmation to {phone}."
+        else:
+            return "I had trouble booking that time. Would you like to try a different slot?"
     except Exception as e:
-        logger.error(f"Booking error: {str(e)}")
-        return False, "I had trouble booking just now. Would you like me to connect you to a team member?"
+        app.logger.error(f"Booking error: {str(e)}")
+        return "I had trouble with the booking system. Would you like me to connect you to a team member?""
 
 # === Twilio flow ===
 @app.route("/twilio", methods=["GET","POST"])
@@ -513,30 +510,36 @@ def twilio_handoff():
             # 1) datetime - AM/PM loop fix with smooth advancement
             if "datetime" not in B:
                 # Enhanced logging for debugging
-                app.logger.info({"call": call_sid, "state": B, "heard": heard_raw})
+                app.logger.info({"call": call_sid, "heard": heard_raw, "booking_state": B})
                 
                 # Handle AM/PM clarification for existing candidate
                 if B.get("awaiting_ampm") and B.get("candidate_dt"):
                     candidate_iso = B["candidate_dt"]
                     try:
-                        cand = datetime.fromisoformat(candidate_iso.replace('Z', '+00:00'))
-                        if cand.tzinfo is None:
-                            cand = TZ.localize(cand)
+                        if isinstance(candidate_iso, str):
+                            cand = datetime.fromisoformat(candidate_iso.replace('Z', '+00:00'))
+                            if cand.tzinfo is None:
+                                cand = TZ.localize(cand)
+                            else:
+                                cand = cand.astimezone(TZ)
                         else:
-                            cand = cand.astimezone(TZ)
+                            cand = candidate_iso
                         
                         hour = cand.hour
                         # If ambiguous (1..11 without explicit AM/PM in original)
                         if 1 <= hour <= 11:
                             if said_morning(heard_raw):
                                 # Keep as AM
+                                app.logger.info(f"AM/PM clarification: keeping {hour} as AM")
                                 pass
                             elif said_afternoon_or_evening(heard_raw):
                                 # Convert to PM
                                 if hour < 12:
                                     cand = cand.replace(hour=(hour % 12) + 12)
+                                    app.logger.info(f"AM/PM clarification: converted {hour} to {cand.hour} PM")
                             else:
                                 # Still unclear—ask once more and return
+                                app.logger.info("AM/PM still unclear, asking again")
                                 prompt = "Did you mean morning or afternoon?"
                                 twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                                 return Response(twiml, mimetype="text/xml")
@@ -545,6 +548,7 @@ def twilio_handoff():
                         B["awaiting_ampm"] = False
                         B["datetime"] = cand.isoformat()
                         B["friendly_dt"] = friendly(cand)
+                        app.logger.info(f"AM/PM resolved, locked in: {B['friendly_dt']}")
                         prompt = f"Great — {B['friendly_dt']}. What's your full name?"
                         twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                         return Response(twiml, mimetype="text/xml")
@@ -556,6 +560,7 @@ def twilio_handoff():
                 
                 # 2A) If caller says "yes" and we already have a candidate, lock it in
                 if said_yes(heard_raw) and B.get("candidate_dt") and not B.get("awaiting_ampm"):
+                    app.logger.info("User confirmed candidate time with affirmative")
                     # Handle both datetime objects and ISO strings
                     candidate = B["candidate_dt"]
                     if isinstance(candidate, str):
@@ -565,11 +570,13 @@ def twilio_handoff():
                             candidate_dt = TZ.localize(candidate_dt)
                         else:
                             candidate_dt = candidate_dt.astimezone(TZ)
+                        B["datetime"] = candidate
+                        B["friendly_dt"] = friendly(candidate_dt)
                     else:
-                        candidate_dt = candidate
+                        B["datetime"] = candidate.isoformat()
+                        B["friendly_dt"] = friendly(candidate)
                     
-                    B["datetime"] = candidate_dt.isoformat()
-                    B["friendly_dt"] = friendly(candidate_dt)
+                    app.logger.info(f"Datetime confirmed: {B['friendly_dt']}, advancing to name collection")
                     prompt = f"Great — {B['friendly_dt']}. What's your full name?"
                     twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                     return Response(twiml, mimetype="text/xml")
@@ -589,24 +596,28 @@ def twilio_handoff():
                 
                 dt, clar = parse_dt_central_enhanced(heard_raw, prior_dt)
                 if clar:
+                    app.logger.info(f"Datetime parsing needs clarification: {clar}")
                     # If we already had a day-only candidate (no am/pm), remember it and ask AM/PM once
                     if dt and "candidate_dt" not in B:
-                        B["candidate_dt"] = dt.isoformat()
+                        B["candidate_dt"] = dt  # Store as datetime object
                         B["awaiting_ampm"] = True
+                        app.logger.info(f"Stored candidate for AM/PM clarification: {friendly(dt)}")
                     prompt = clar  # Keep this short, no repeating examples
                     twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                     return Response(twiml, mimetype="text/xml")
 
                 if dt:
+                    app.logger.info(f"Datetime parsed successfully: {friendly(dt)}")
                     # Store candidate and confirm once
-                    B["candidate_dt"] = dt.isoformat()  # Store as ISO string to avoid serialization issues
-                    B["last_context_dt"] = dt.isoformat()  # Reuse day if caller later says "10 am" only
+                    B["candidate_dt"] = dt  # Store as datetime object for easy manipulation
+                    B["last_context_dt"] = dt.isoformat()  # Store ISO for context reuse
                     B["candidate_friendly"] = friendly(dt)
                     prompt = f"Just to confirm, {B['candidate_friendly']} — is that right?"
                     twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                     return Response(twiml, mimetype="text/xml")
 
                 # 2C) Couldn't parse—ask simply (no repeating 'for example' every turn)
+                app.logger.info("Could not parse datetime from input")
                 if B.get("datetime_attempts", 0) == 0:
                     prompt = "What day and time works for you? For example, Tuesday at 10 A M."
                     B["datetime_attempts"] = 1
@@ -618,75 +629,71 @@ def twilio_handoff():
 
             # 2) name
             if "name" not in B:
-                # Naive extract: look for "my name is …"
+                app.logger.info(f"Collecting name, heard: {heard_raw}")
                 m = re.search(r"(my name is|this is)\s+([a-zA-Z][a-zA-Z ,.'-]+)$", heard_raw, re.I)
                 if m:
                     B["name"] = m.group(2).strip()
-                    reply = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
+                    app.logger.info(f"Name extracted: {B['name']}")
+                    prompt = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
                 else:
-                    # Look for capitalized words that might be names
+                    # Look for capitalized words as potential names
                     words = heard_raw.split()
-                    potential_name = ""
-                    for i, word in enumerate(words):
-                        if word and word[0].isupper() and len(word) > 1:
-                            potential_name = " ".join(words[i:])
-                            break
-                    
-                    if potential_name and len(potential_name.split()) >= 1:
-                        B["name"] = potential_name.strip()
-                        reply = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
+                    capitalized = [w for w in words if w and w[0].isupper() and w.isalpha()]
+                    if len(capitalized) >= 2:
+                        B["name"] = " ".join(capitalized)
+                        app.logger.info(f"Name detected from capitalized words: {B['name']}")
+                        prompt = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
                     else:
-                        reply = "Got it. May I have your full name?"
-                
-                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                        prompt = "Got it. May I have your full name?"
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                 return Response(twiml, mimetype="text/xml")
 
             # 3) phone
             if "phone" not in B:
+                app.logger.info(f"Collecting phone, heard: {heard_raw}")
                 digits = re.sub(r"\D", "", heard_raw)
                 if len(digits) >= 10:
                     B["phone"] = f"+1{digits[-10:]}"
-                    reply = "Thank you. What email should we use to send your confirmation?"
+                    app.logger.info(f"Phone extracted: {B['phone']}")
+                    prompt = "Thank you. What email should we use to send your confirmation?"
                 else:
-                    reply = "Could you share your mobile number digit by digit, including area code?"
-                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                    app.logger.info(f"Phone digits insufficient: {len(digits)} digits found")
+                    prompt = "Could you share your mobile number digit by digit, including area code?"
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                 return Response(twiml, mimetype="text/xml")
 
-            # 4) email
+            # 4) email → book
             if "email" not in B:
+                app.logger.info(f"Collecting email, heard: {heard_raw}")
                 m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", heard_raw, re.I)
                 if m:
                     B["email"] = m.group(0)
-                    # Attempt booking
-                    payload = {
-                        "name": B["name"],
-                        "phone": B["phone"],
-                        "email": B["email"],
-                        "datetime": B["datetime"],
-                    }
+                    app.logger.info(f"Email extracted: {B['email']}")
+                    payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
+                    app.logger.info(f"Attempting booking with payload: {payload}")
                     try:
                         r = requests.post(f"{base}/book", json=payload, timeout=60)
                         if r.status_code == 200:
-                            reply = f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}."
+                            app.logger.info("Booking successful")
+                            prompt = f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}."
                             # Clear booking state after successful booking
-                            session["booking"] = {}
+                            B.clear()
                         else:
-                            reply = "I couldn't complete the booking just now. Would you like me to try a different time?"
+                            app.logger.error(f"Booking failed with status {r.status_code}: {r.text}")
+                            prompt = "I couldn't complete the booking just now. Would you like me to try a different time?"
                     except Exception as e:
-                        logger.error(f"Booking error: {str(e)}")
-                        reply = "I had trouble booking just now. Would you like me to connect you to a team member?"
-                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
-                    return Response(twiml, mimetype="text/xml")
+                        app.logger.error(f"Booking request failed: {e}")
+                        prompt = "I had trouble booking just now. Would you like me to connect you to a team member?"
                 else:
-                    reply = "Please spell your email address clearly."
-                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
-                    return Response(twiml, mimetype="text/xml")
+                    prompt = "Please spell your email address clearly."
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
+                return Response(twiml, mimetype="text/xml")
 
         # --- Non-booking conversation: try chiropractic responses first ---
         chiro_response = match_chiropractic_response(heard_raw)
         if chiro_response:
             reply = chiro_response
-            logger.info(f"Using chiropractic response: {reply}")
+            app.logger.info(f"Using chiropractic response: {reply}")
         else:
             # Fallback for general conversation
             reply = "I can help with hours, location, services, or I can book an appointment. What would you like?"
@@ -701,7 +708,7 @@ def twilio_handoff():
         fallback = "I had a little trouble just then. Could you say that one more time, like Monday at 9 A M?"
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, fallback)}</Response>"""
         
-        logger.info(f"Using fallback TwiML for call {call_sid}")
+        app.logger.info(f"Using fallback TwiML for call {call_sid}")
         return Response(twiml, mimetype="text/xml")
 
 # Health check endpoint
@@ -709,7 +716,7 @@ def twilio_handoff():
 def health_check():
     """Simple health check endpoint"""
     print("Health check endpoint called")
-    logger.info("Health check endpoint called")
+    app.logger.info("Health check endpoint called")
     return jsonify({"status": "ok"}), 200
 
 # Voice endpoint for API testing
@@ -722,7 +729,7 @@ def voice_endpoint():
             return jsonify({"error": "Missing 'text' field in request"}), 400
         
         text = data['text']
-        logger.info(f"Voice endpoint called with text: {text}")
+        app.logger.info(f"Voice endpoint called with text: {text}")
         
         # Generate audio using ElevenLabs
         audio_bytes = tts_bytes(text)
@@ -736,7 +743,7 @@ def voice_endpoint():
         return send_file(temp_path, mimetype='audio/mpeg', as_attachment=True, download_name='voice.mp3')
         
     except Exception as e:
-        logger.error(f"Error in voice endpoint: {str(e)}")
+        app.logger.error(f"Error in voice endpoint: {str(e)}")
         return jsonify({"error": "Failed to generate voice"}), 500
 
 # Book appointment endpoint
@@ -745,7 +752,7 @@ def book_appointment():
     """Book an appointment using GoHighLevel API."""
     try:
         data = request.get_json()
-        logger.info(f"Booking request received: {data}")
+        app.logger.info(f"Booking request received: {data}")
         
         # Validate required fields
         required_fields = ['name', 'phone', 'email', 'datetime']
@@ -818,14 +825,14 @@ def book_appointment():
             contact_id = contact_data.get('contact', {}).get('id') or contact_data.get('id')
             payload["contactId"] = contact_id
         else:
-            logger.warning(f"Failed to create contact: {contact_response.text}")
+            app.logger.warning(f"Failed to create contact: {contact_response.text}")
         
         # Create appointment
         response = requests.post(ghl_url, json=payload, headers=headers)
         
         if response.status_code in [200, 201]:
             result = response.json()
-            logger.info(f"Appointment booked successfully: {result}")
+            app.logger.info(f"Appointment booked successfully: {result}")
             return jsonify({
                 "success": True,
                 "message": "Appointment booked successfully",
@@ -833,14 +840,14 @@ def book_appointment():
                 "datetime": formatted_datetime
             }), 200
         else:
-            logger.error(f"GoHighLevel API error: {response.status_code} - {response.text}")
+            app.logger.error(f"GoHighLevel API error: {response.status_code} - {response.text}")
             return jsonify({
                 "success": False,
                 "error": "Failed to book appointment with GoHighLevel"
             }), 500
             
     except Exception as e:
-        logger.error(f"Error booking appointment: {str(e)}")
+        app.logger.error(f"Error booking appointment: {str(e)}")
         return jsonify({
             "success": False,
             "error": "Internal server error"
