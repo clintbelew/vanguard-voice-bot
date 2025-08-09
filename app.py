@@ -87,6 +87,138 @@ def parse_datetime_central(text: str) -> tuple[datetime|None, str|None]:
 
     return dt.astimezone(TZ), None
 
+# === Chiropractic-specific trigger-response library ===
+CHIROPRACTIC_RESPONSES = {
+    "version": "1.0",
+    "domain": "chiropractic",
+    "responses": [
+        {
+            "id": "back_pain",
+            "triggers": ["back hurts", "back pain", "lower back", "hurt my back", "back injury", "sciatica"],
+            "reply": "I'm sorry your back is hurting. Let's get you scheduled so the doctor can help. What day and time work best for you?"
+        },
+        {
+            "id": "neck_pain",
+            "triggers": ["neck pain", "stiff neck", "crick in my neck", "whiplash"],
+            "reply": "Neck pain can be rough. We can help with that. Would you like to schedule a visit this week?"
+        },
+        {
+            "id": "headache_migraine",
+            "triggers": ["headache", "migraines", "migraine"],
+            "reply": "I understand how disruptive headaches can be. We often help with that. Want me to find a time for you to come in?"
+        },
+        {
+            "id": "new_patient",
+            "triggers": ["new patient", "first time", "never been", "how do I start"],
+            "reply": "Welcome! I'll get you set up. Can I have your full name and a good mobile number to book your first visit?"
+        },
+        {
+            "id": "follow_up",
+            "triggers": ["follow up", "another appointment", "next adjustment", "come back in"],
+            "reply": "Absolutely. When would you like to come in—morning or afternoon?"
+        },
+        {
+            "id": "walk_in",
+            "triggers": ["walk in", "walk-in", "can I just come", "no appointment"],
+            "reply": "We accept walk-ins when we can, but booking saves you waiting. What time works for you and I'll reserve it?"
+        },
+        {
+            "id": "hours",
+            "triggers": ["hours", "open", "what time are you open", "closing time"],
+            "reply": "We're open Monday through Friday 9 to 6, and Saturday 9 to 1. What day would you like to come in?"
+        },
+        {
+            "id": "location",
+            "triggers": ["where are you", "address", "location", "how do I get there", "directions"],
+            "reply": "We're located at your Vanguard office address. Would you like me to book you a time to come in?"
+        },
+        {
+            "id": "pricing",
+            "triggers": ["price", "cost", "how much", "visit cost"],
+            "reply": "A standard visit is typically discussed with the doctor based on your needs, and we have self-pay options. Would you like to book a visit to get started?"
+        },
+        {
+            "id": "insurance",
+            "triggers": ["insurance", "do you take", "in network", "coverage"],
+            "reply": "We work with many insurance plans and have self-pay options. I can connect you with our team to confirm coverage, or we can go ahead and schedule you."
+        },
+        {
+            "id": "today_urgent",
+            "triggers": ["today", "asap", "urgent", "right now", "soonest"],
+            "reply": "Let me look for our earliest openings today. Do you prefer morning or afternoon?"
+        },
+        {
+            "id": "auto_accident",
+            "triggers": ["car accident", "auto accident", "hit", "rear-ended"],
+            "reply": "I'm sorry you were in an accident. We help with whiplash and related injuries. Shall I book an evaluation for you?"
+        },
+        {
+            "id": "sports_injury",
+            "triggers": ["pulled", "sprained", "strain", "sports injury"],
+            "reply": "We see sports injuries often. Let's set up a visit so the doctor can evaluate it. When works for you?"
+        },
+        {
+            "id": "pediatric",
+            "triggers": ["child", "kid", "pediatric"],
+            "reply": "Yes, we treat children as well. Would you like to set up a time for your child this week?"
+        },
+        {
+            "id": "prenatal",
+            "triggers": ["pregnant", "prenatal", "pregnancy"],
+            "reply": "We do offer prenatal chiropractic care. I can book you a comfortable time. What day works best?"
+        },
+        {
+            "id": "xray",
+            "triggers": ["x-ray", "xray", "imaging"],
+            "reply": "We can take X-rays if the doctor recommends them during your visit. Want me to get you scheduled?"
+        },
+        {
+            "id": "payment_plans",
+            "triggers": ["payment plan", "financing", "payments"],
+            "reply": "We do have payment options. We can discuss those at your visit. Would you like me to reserve a time?"
+        },
+        {
+            "id": "book_appointment",
+            "triggers": ["book", "appointment", "schedule", "make an appointment", "set up a visit"],
+            "reply": "I can help with that. What day works best for you, and do you prefer morning or afternoon?"
+        },
+        {
+            "id": "contact_info_request",
+            "triggers": ["my name is", "number is", "email is", "here is my"],
+            "reply": "Thanks! I'll confirm: please share your full name, your mobile number digit by digit, and your email spelled out. Then I'll secure your appointment."
+        },
+        {
+            "id": "goodbye",
+            "triggers": ["thank you", "thanks", "bye", "goodbye"],
+            "reply": "You're very welcome. We look forward to seeing you soon!"
+        }
+    ],
+    "fallbacks": {
+        "no_speech": "I didn't catch that. Could you repeat that a little more clearly, like 'Monday at 9 AM'?",
+        "clarify_time": "Did you mean 9 AM or 9 PM, and what day works for you?",
+        "clarify_contact": "To finalize your booking, may I have your full name, mobile number, and email address?"
+    }
+}
+
+def match_chiropractic_response(user_input: str) -> str|None:
+    """
+    Match user input against chiropractic trigger-response library.
+    Returns the appropriate response if a trigger matches, None otherwise.
+    """
+    if not user_input:
+        return None
+    
+    user_lower = user_input.lower()
+    
+    # Check each response for trigger matches
+    for response in CHIROPRACTIC_RESPONSES["responses"]:
+        for trigger in response["triggers"]:
+            if trigger.lower() in user_lower:
+                logger.info(f"Matched trigger '{trigger}' for response ID '{response['id']}'")
+                return response["reply"]
+    
+    return None
+
 # === ElevenLabs TTS ===
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
 VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "cgSgspJ2msm6clMCkdW9")  # Jessica
@@ -250,18 +382,38 @@ def twilio_handoff():
         session["history"].append({"role": "user", "content": heard})
 
     # Detect booking intent cheaply (can also rely on LLM)
-    wants_booking = any(k in heard.lower() for k in ["book", "schedule", "appointment", "time", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "tomorrow", "next week", "am", "pm"])
+    wants_booking = any(k in heard.lower() for k in ["book", "schedule", "appointment", "time", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "tomorrow", "next week", "am", "pm"]) if heard else False
 
+    # Handle case where no speech was detected
+    if not heard:
+        reply = CHIROPRACTIC_RESPONSES["fallbacks"]["no_speech"]
+        logger.info("No speech detected, using chiropractic fallback")
+    
+    # First, try to match against chiropractic-specific responses
+    elif chiro_response := match_chiropractic_response(heard):
+        # Use chiropractic-specific response and check if it triggers booking
+        reply = chiro_response
+        
+        # Check if the chiropractic response indicates booking intent
+        booking_triggers = ["what day", "time work", "schedule", "book", "reserve", "appointment"]
+        if any(trigger in reply.lower() for trigger in booking_triggers):
+            session["booking"]["intent"] = "booking"
+        
+        logger.info(f"Using chiropractic response: {reply}")
+        
     # Handle booking flow with step-by-step collection
-    if wants_booking or session["booking"].get("intent") == "booking":
+    elif wants_booking or session["booking"].get("intent") == "booking":
         session["booking"]["intent"] = "booking"
         
         # Step 1: Collect datetime if missing
         if "datetime" not in session["booking"]:
             dt, clarifier = parse_datetime_central(heard)
             if clarifier:
-                # Need clarification on the time
-                reply = clarifier
+                # Need clarification on the time - use chiropractic fallback if appropriate
+                if "9 AM or 9 PM" in clarifier:
+                    reply = CHIROPRACTIC_RESPONSES["fallbacks"]["clarify_time"]
+                else:
+                    reply = clarifier
             elif dt:
                 # Successfully parsed time, store it
                 session["booking"]["datetime"] = dt.isoformat()
