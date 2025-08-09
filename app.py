@@ -59,6 +59,9 @@ FRUSTRATION_KEYWORDS = ["frustrated", "annoying", "stupid", "not working", "terr
 CONFUSION_KEYWORDS = ["confused", "don't understand", "what", "huh", "repeat", "say again"]
 PAIN_KEYWORDS = ["pain", "hurt", "ache", "sore", "injury", "accident", "can't move"]
 
+# Human handoff detection
+HUMAN_HANDOFF_KEYWORDS = ["speak to someone", "team member", "human", "representative", "real person", "talk to someone", "live person", "actual person"]
+
 def said_yes(s): 
     return any(a in (s or "").lower() for a in AFFIRM)
 
@@ -129,6 +132,60 @@ def get_contextual_response(stage, B, S):
         return random.choice(responses.get(stage, ["How can I help?"]))
     
     return None
+
+def cleanup_name(text):
+    """Precision Fix 3: Clean up name capture with proper formatting."""
+    if not text:
+        return ""
+    
+    # Remove filler phrases more precisely
+    cleaned = text.lower()
+    filler_patterns = [
+        r'\bmy name is\b',
+        r'\bfirst name is\b', 
+        r'\blast name is\b',
+        r'\bname is\b',
+        r'\bit\'s\b',
+        r'\bthis is\b'
+    ]
+    
+    for pattern in filler_patterns:
+        cleaned = re.sub(pattern, '', cleaned)
+    
+    # Collapse spelled-out letters: "c l i n t" -> "clint"
+    cleaned = re.sub(r'\b([a-z])\s+(?=[a-z]\b)', r'\1', cleaned)
+    
+    # Clean up and title case
+    cleaned = re.sub(r'[^\w\s-]', '', cleaned).strip()
+    return ' '.join(word.capitalize() for word in cleaned.split() if word)
+
+def normalize_email_advanced(text):
+    """Precision Fix 2: Advanced email normalization with filler phrase removal."""
+    if not text:
+        return ""
+    
+    # Remove filler phrases
+    filler_phrases = ["it's", "this is", "my email is", "email is", "the email is", "my email address is"]
+    cleaned = text.lower()
+    for phrase in filler_phrases:
+        cleaned = cleaned.replace(phrase, "")
+    
+    # Remove all punctuation except email-valid characters
+    cleaned = re.sub(r'[^\w\s@._+-]', '', cleaned)
+    
+    # Apply spoken email normalization
+    return normalize_spoken_email(cleaned)
+
+def detect_human_handoff(text):
+    """Precision Fix 5: Detect requests for human assistance."""
+    t = (text or "").lower()
+    return any(phrase in t for phrase in HUMAN_HANDOFF_KEYWORDS)
+
+def has_ampm_indicator(text):
+    """Precision Fix 1: Check if text contains AM/PM indicators."""
+    t = (text or "").lower()
+    ampm_patterns = ["am", "pm", "a.m.", "p.m.", "a m", "p m"]
+    return any(pattern in t for pattern in ampm_patterns)
 
 def normalize_time_tokens(text: str) -> str:
     """Normalize time tokens to fix AM/PM parsing issues per gold standard spec."""
@@ -465,6 +522,13 @@ def twilio_handoff():
             log_turn({"emotional_state_detected": True, "response": emotional_response})
             return respond_gather(base, emotional_response)
         
+        # Precision Fix 5: Check for human handoff requests
+        if detect_human_handoff(heard_raw):
+            log_turn({"fix_applied": "human_handoff", "heard": heard_raw})
+            # Clear booking state and mark for human callback
+            CALLS[call_sid] = {"booking": {}, "human_requested": True}
+            return respond_gather(base, "I'll connect you with a team member right away. Please hold on while I transfer you, or someone will call you back within a few minutes.")
+        
         # Detect booking intent from phrases
         booking_keywords = ["book", "schedule", "appointment", "come in", "new patient", "back hurts", "pain", "visit"]
         if any(k in heard_raw.lower() for k in booking_keywords) or B.get("intent") == "booking":
@@ -514,11 +578,26 @@ def twilio_handoff():
                 # C) Parse new time utterance with normalization
                 dt, clar = parse_dt_central(heard_raw, B.get("last_context_dt"))
                 
-                # If clarification needed (only for truly ambiguous times)
+                # Precision Fix 1: Skip AM/PM clarification if already specified
+                if clar and has_ampm_indicator(heard_raw):
+                    log_turn({"fix_applied": "skip_ampm", "heard": heard_raw, "reason": "ampm_already_specified"})
+                    # Force accept the datetime without clarification
+                    if dt:
+                        B["datetime"] = dt.isoformat()
+                        B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
+                        log_turn({"stage": "datetime_confirmed_auto", "datetime": B["datetime"]})
+                        
+                        contextual_response = get_contextual_response("datetime_confirmed", B, session)
+                        if contextual_response:
+                            return respond_gather(base, contextual_response)
+                        else:
+                            return respond_gather(base, f"Great. What's your full name?")
+                
                 if clar:
-                    B["candidate_dt"] = dt or B.get("last_context_dt")
+                    # Only ask AM/PM if truly ambiguous AND no am/pm specified
+                    if not B.get("candidate_dt") and B.get("last_context_dt"):
+                        B["candidate_dt"] = B["last_context_dt"]
                     B["awaiting_ampm"] = True
-                    app.logger.info({"stage": "datetime_clarification", "heard": heard_raw, "clarification": clar})
                     return respond_gather(base, clar)
 
                 # If we got a valid datetime, confirm it
@@ -533,18 +612,18 @@ def twilio_handoff():
                 app.logger.info({"stage": "datetime_request", "heard": heard_raw})
                 return respond_gather(base, "What day and time works for you?")
 
-            # 2) Name capture - accept any non-empty utterance per specification
+            # === NAME CAPTURE ===
             elif "name" not in B:
-                cleaned = heard_raw.strip()
-                if cleaned:
-                    B["name"] = cleaned
-                    app.logger.info({"stage": "name_captured", "heard": heard_raw, "name": B["name"]})
+                # Precision Fix 3: Clean up name capture with proper formatting
+                cleaned_name = cleanup_name(heard_raw)
+                if cleaned_name:
+                    B["name"] = cleaned_name
+                    log_turn({"fix_applied": "name_cleanup", "heard": heard_raw, "cleaned": cleaned_name})
                     return respond_gather(base, f"Thanks, {B['name']}. What's the best mobile number for confirmation? Please say it digit by digit.")
                 else:
-                    app.logger.info({"stage": "name_empty", "heard": heard_raw})
                     return respond_gather(base, "I didn't catch your name. Could you say it again?")
 
-            # 3) Phone capture - extract digits only per specification
+            # === PHONE CAPTURE ===
             elif "phone" not in B:
                 digits = re.sub(r"\D", "", heard_raw)
                 if len(digits) >= 10:
@@ -555,14 +634,14 @@ def twilio_handoff():
                     app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits)})
                     return respond_gather(base, "Could you share your mobile number digit by digit, including area code?")
 
-            # 4) Email capture with gold standard normalization
+            # === EMAIL CAPTURE ===
             elif "email" not in B:
-                # Normalize spoken email first
-                norm1 = normalize_spoken_email(heard_raw)
+                # Precision Fix 2: Advanced email normalization with filler phrase removal
+                norm1 = normalize_email_advanced(heard_raw)
                 m = EMAIL_RE.search(heard_raw) or EMAIL_RE.search(norm1)
                 if m:
                     B["email"] = m.group(0)
-                    app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "email": B["email"]})
+                    log_turn({"fix_applied": "email_normalization", "heard": heard_raw, "normalized": norm1, "email": B["email"]})
                     
                     # Proceed directly to booking per specification with timeout handling
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
@@ -592,9 +671,10 @@ def twilio_handoff():
 
         # === NON-BOOKING CONVERSATION ===
         else:
-            if not heard_raw:
-                app.logger.info({"stage": "empty_speech", "heard": heard_raw})
-                return respond_gather(base, "Sorry, I didn't catch that — could you say it again?")
+            # Precision Fix 4: Empty speech handling with shorter delay
+            if not heard_raw.strip():
+                log_turn({"fix_applied": "empty_speech", "stage": "quick_reprompt"})
+                return respond_gather(base, "Still with me? How can I help you today?")
             
             # Natural follow-ups / FAQs (short, friendly)
             heard_lower = heard_raw.lower()
