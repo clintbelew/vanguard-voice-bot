@@ -41,8 +41,17 @@ def norm(text: str) -> str:
 
 def said_yes(txt: str) -> bool:
     """Check if user said an affirmative response."""
+    return any(a in (txt or "").lower() for a in AFFIRM)
+
+def said_morning(txt: str) -> bool:
+    """Check if user indicated morning time."""
     t = (txt or "").lower()
-    return any(a in t for a in AFFIRM)
+    return "morning" in t or "a m" in t or "am" in t
+
+def said_afternoon_or_evening(txt: str) -> bool:
+    """Check if user indicated afternoon/evening time."""
+    t = (txt or "").lower()
+    return "afternoon" in t or "evening" in t or "p m" in t or "pm" in t
 
 def friendly(dt):
     """Format datetime in a friendly way."""
@@ -501,13 +510,52 @@ def twilio_handoff():
         if any(k in heard for k in ["book","schedule","appointment"]) or B.get("intent") == "booking":
             B["intent"] = "booking"
 
-            # 1) datetime - confirm-once-then-advance flow
+            # 1) datetime - AM/PM loop fix with smooth advancement
             if "datetime" not in B:
                 # Enhanced logging for debugging
                 app.logger.info({"call": call_sid, "state": B, "heard": heard_raw})
                 
+                # Handle AM/PM clarification for existing candidate
+                if B.get("awaiting_ampm") and B.get("candidate_dt"):
+                    candidate_iso = B["candidate_dt"]
+                    try:
+                        cand = datetime.fromisoformat(candidate_iso.replace('Z', '+00:00'))
+                        if cand.tzinfo is None:
+                            cand = TZ.localize(cand)
+                        else:
+                            cand = cand.astimezone(TZ)
+                        
+                        hour = cand.hour
+                        # If ambiguous (1..11 without explicit AM/PM in original)
+                        if 1 <= hour <= 11:
+                            if said_morning(heard_raw):
+                                # Keep as AM
+                                pass
+                            elif said_afternoon_or_evening(heard_raw):
+                                # Convert to PM
+                                if hour < 12:
+                                    cand = cand.replace(hour=(hour % 12) + 12)
+                            else:
+                                # Still unclear—ask once more and return
+                                prompt = "Did you mean morning or afternoon?"
+                                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
+                                return Response(twiml, mimetype="text/xml")
+
+                        # Lock in and advance
+                        B["awaiting_ampm"] = False
+                        B["datetime"] = cand.isoformat()
+                        B["friendly_dt"] = friendly(cand)
+                        prompt = f"Great — {B['friendly_dt']}. What's your full name?"
+                        twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
+                        return Response(twiml, mimetype="text/xml")
+                    except Exception as e:
+                        app.logger.error(f"Error processing AM/PM clarification: {e}")
+                        # Clear state and start over
+                        B.pop("awaiting_ampm", None)
+                        B.pop("candidate_dt", None)
+                
                 # 2A) If caller says "yes" and we already have a candidate, lock it in
-                if said_yes(heard_raw) and B.get("candidate_dt"):
+                if said_yes(heard_raw) and B.get("candidate_dt") and not B.get("awaiting_ampm"):
                     # Handle both datetime objects and ISO strings
                     candidate = B["candidate_dt"]
                     if isinstance(candidate, str):
@@ -541,8 +589,11 @@ def twilio_handoff():
                 
                 dt, clar = parse_dt_central_enhanced(heard_raw, prior_dt)
                 if clar:
-                    # Ask a short clarifier (no examples)
-                    prompt = clar
+                    # If we already had a day-only candidate (no am/pm), remember it and ask AM/PM once
+                    if dt and "candidate_dt" not in B:
+                        B["candidate_dt"] = dt.isoformat()
+                        B["awaiting_ampm"] = True
+                    prompt = clar  # Keep this short, no repeating examples
                     twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, prompt)}</Response>"""
                     return Response(twiml, mimetype="text/xml")
 
