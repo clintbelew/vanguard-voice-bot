@@ -8,11 +8,12 @@ import json
 import sys
 import urllib.parse
 import time
+import re
 from flask import Flask, request, jsonify, send_file, Response, session
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Gather
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 import dateparser
 from dateutil import parser as dateutil_parser
 import openai
@@ -21,14 +22,69 @@ import openai
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)  # Ensure logs go to stdout for Railway
-    ]
-)
-logger = logging.getLogger('vanguard')
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# === Reliable datetime parser for America/Chicago ===
+TZ = pytz.timezone("America/Chicago")
+DOW = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+
+def normalize_uttr(t: str) -> str:
+    """Normalize user utterance for better datetime parsing."""
+    t = t.lower().strip()
+    t = t.replace("o'clock", " o clock ")
+    t = re.sub(r"\bten in the morning\b", "10 am", t)
+    t = re.sub(r"\b(\d+)\s*in the morning\b", r"\1 am", t)
+    t = re.sub(r"\b(\d+)\s*in the evening\b", r"\1 pm", t)
+    return re.sub(r"\s+", " ", t)
+
+def parse_dt_central(text: str) -> tuple[datetime|None, str|None]:
+    """
+    Parse natural language datetime for America/Chicago timezone.
+    Returns (datetime, None) if successful, (None, clarifier_question) if needs clarification.
+    """
+    t = normalize_uttr(text)
+    settings = {
+        "TIMEZONE": "America/Chicago",
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",
+    }
+    
+    # Common fast path: "tuesday at 10 am"
+    if any(d in t for d in DOW) and re.search(r"\b(\d{1,2})(:\d{2})?\s*(am|pm)\b", t):
+        dt = dateparser.parse(t, settings=settings)
+        if dt: 
+            return dt.astimezone(TZ), None
+
+    # If only day-of-week + hour (no am/pm): ask to clarify
+    if any(d in t for d in DOW) and re.search(r"\b(\d{1,2})(:\d{2})?\b", t) and not re.search(r"\bam|pm\b", t):
+        return None, "Did you mean A M or P M for that time?"
+
+    # Generic parse
+    dt = dateparser.parse(t, settings=settings)
+    if not dt:
+        return None, "What day and time works for you? For example, Tuesday at 10 A M."
+    
+    # If still ambiguous morning/evening for 1-11 and no am/pm present
+    if (1 <= dt.hour <= 11) and ("am" not in t and "pm" not in t):
+        return None, f"Just to confirm, did you mean {dt.strftime('%A at %-I A M')} or {dt.strftime('%-I P M')}?"
+    
+    return dt.astimezone(TZ), None
+
+# Environment variables
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
+VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "cgSgspJ2msm6clMCkdW9")  # Jessica
+ELEVEN_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+
+# GoHighLevel settings
+GHL_API_KEY = os.environ.get("GHL_API_KEY")
+GHL_LOCATION_ID = os.environ.get("GHL_LOCATION_ID")
+GHL_CALENDAR_ID = os.environ.get("GHL_CALENDAR_ID")
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -397,9 +453,12 @@ def twilio_entry():
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{greet_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto"
-          enhanced="true" speechModel="phone_call"
-          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
+  <Gather input="speech"
+          language="en-US"
+          speechTimeout="auto"
+          enhanced="true"
+          speechModel="phone_call"
+          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
@@ -416,6 +475,7 @@ def twilio_handoff():
     call_sid = request.values.get("CallSid", "NA")
     heard = (request.values.get("SpeechResult") or "").strip()
     
+    # Enhanced logging to see exactly what Twilio heard
     app.logger.info({"call": call_sid, "heard": heard})
     
     try:
@@ -428,22 +488,49 @@ def twilio_handoff():
         if heard:
             session["history"].append({"role": "user", "content": heard})
         
-        # Generate reply with fallback
+        # Generate reply with booking state confirmation flow
+        B = session.setdefault("booking", {})
+        
         if heard:
-            # Try chiropractic responses first
-            chiro_response = match_chiropractic_response(heard)
-            if chiro_response:
-                reply = chiro_response
-                logger.info(f"Using chiropractic response: {reply}")
+            # Check for booking intent
+            if ("book" in heard.lower() or "appointment" in heard.lower() or B.get("intent") == "booking"):
+                B["intent"] = "booking"
+                
+                if "datetime" not in B:
+                    # Try to parse datetime from user input
+                    dt, clar = parse_dt_central(heard)
+                    if clar:
+                        # Need clarification
+                        reply = clar
+                    elif dt:
+                        # Successfully parsed datetime
+                        B["datetime"] = dt.isoformat()
+                        reply = dt.strftime("Great — %A at %-I:%M %p. What is your full name?")
+                    else:
+                        # Couldn't parse datetime
+                        reply = "What day and time works for you? For example, Tuesday at 10 A M."
+                else:
+                    # Already have datetime, collect other info
+                    reply = "Thanks. Please tell me your full name, mobile number, and email so I can confirm the booking."
             else:
-                # Use OpenAI for natural conversation
-                reply = openai_chat(session["history"])
+                # Not booking intent - try chiropractic responses first
+                chiro_response = match_chiropractic_response(heard)
+                if chiro_response:
+                    reply = chiro_response
+                    logger.info(f"Using chiropractic response: {reply}")
+                else:
+                    # Use OpenAI for natural conversation
+                    reply = openai_chat(session["history"])
         else:
             # No speech detected
             reply = CHIROPRACTIC_RESPONSES["fallbacks"]["no_speech"]
         
-        # Add assistant reply to history
-        session["history"].append({"role": "assistant", "content": reply})
+        # Add assistant reply to conversation history (for non-booking conversations)
+        if B.get("intent") != "booking":
+            session["history"].append({"role": "assistant", "content": reply})
+        
+        logger.info(f"Generated reply: {reply}")
+        logger.info(f"Booking state: {B}")
         
         # Generate TTS URL
         tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
@@ -452,9 +539,12 @@ def twilio_handoff():
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{tts_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto"
-          enhanced="true" speechModel="phone_call"
-          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
+  <Gather input="speech"
+          language="en-US"
+          speechTimeout="auto"
+          enhanced="true"
+          speechModel="phone_call"
+          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
@@ -474,9 +564,12 @@ def twilio_handoff():
         fallback_twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{tts_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto"
-          enhanced="true" speechModel="phone_call"
-          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
+  <Gather input="speech"
+          language="en-US"
+          speechTimeout="auto"
+          enhanced="true"
+          speechModel="phone_call"
+          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
