@@ -55,16 +55,20 @@ def said_yes(s):
     return any(a in (s or "").lower() for a in AFFIRM)
 
 def said_morning(s): 
-    return any(k in (s or "").lower() for k in ["morning","am","a m"])
+    return any(k in (s or "").lower() for k in ["morning","am","a m","good morning"])
 
 def said_afternoon(s): 
-    return any(k in (s or "").lower() for k in ["afternoon","evening","pm","p m"])
+    return any(k in (s or "").lower() for k in ["afternoon","evening","pm","p m","good afternoon"])
+
+def said_natural_confirmation(s):
+    """Accept natural confirmations like 'yes', 'that works', 'sounds good'."""
+    confirmations = ["yes", "yep", "sure", "that works", "sounds good", "perfect", "great", "okay", "ok"]
+    return any(conf in (s or "").lower() for conf in confirmations)
 
 def normalize_time_tokens(text: str) -> str:
-    """Normalize time tokens to fix AM/PM parsing issues."""
+    """Normalize time tokens to fix AM/PM parsing issues per gold standard spec."""
     t = (text or "").lower()
-    # join spaced letters: "a p m" -> "pm", "a m" -> "am"
-    t = re.sub(r"\b([ap])\s*p\s*m\b", lambda m: f"{m.group(1)}pm", t)
+    # join spaced letters: "a m" -> "am", "p m" -> "pm"
     t = re.sub(r"\b([ap])\s*m\b", lambda m: f"{m.group(1)}m", t)
     # fix artifacts like "2a pm" / "2apm" -> "2 pm"
     t = re.sub(r"(\d)\s*a\s*pm\b", r"\1 pm", t)
@@ -85,7 +89,7 @@ def normalize_email_tokens(text: str) -> str:
     t = re.sub(r"\s+", "", t)
     return t
 
-# Enhanced email normalization for natural speech
+# Enhanced email normalization for natural speech per specification
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 
 SPOKEN_MAP = {
@@ -94,15 +98,14 @@ SPOKEN_MAP = {
 }
 
 def normalize_spoken_email(text: str) -> str:
-    """Normalize spoken email like 'john at gmail dot com' to 'john@gmail.com'."""
+    """Normalize spoken email like 'john at gmail dot com' to 'john@gmail.com' per specification."""
     t = " " + (text or "").lower().strip() + " "
     # collapse spelled letters like "g m a i l" -> "gmail"
     t = re.sub(r"\b([a-z])\s+(?=[a-z]\b)", r"\1", t)
     # replace spoken tokens
     for k, v in SPOKEN_MAP.items():
         t = t.replace(k, v)
-    t = re.sub(r"\s+", "", t)  # remove remaining spaces
-    return t
+    return re.sub(r"\s+", "", t)
 
 def norm(text: str) -> str:
     """Normalize text for consistent processing."""
@@ -110,7 +113,7 @@ def norm(text: str) -> str:
 
 def parse_dt_central(user_text: str, prior_dt=None):
     """
-    Enhanced datetime parser with normalization - no AM/PM questions when already specified.
+    Enhanced datetime parser with normalization - skip AM/PM when already specified.
     Returns (dt: aware datetime | None, clarify: str | None)
     """
     # Normalize time tokens first
@@ -126,7 +129,7 @@ def parse_dt_central(user_text: str, prior_dt=None):
         return None, "What day and time works for you?"
 
     # If the user explicitly said am/pm (after normalization), accept it — no clarification
-    if "am" in t or "pm" in t:
+    if any(indicator in t for indicator in ["am", "a.m.", "pm", "p.m."]):
         return dt.astimezone(TZ), None
 
     # Otherwise, if hour is 1–11 and no am/pm, ask once
@@ -350,7 +353,7 @@ def twilio_entry():
 # === Gold-standard conversation handler ===
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Gold-standard conversation handler with no loops or redundant questions."""
+    """Gold-standard conversation handler with enhanced logging per specification."""
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
     heard_raw = request.values.get("SpeechResult", "") or ""
@@ -360,16 +363,18 @@ def twilio_handoff():
     session = get_session(call_sid)
     B = session.setdefault("booking", {})
     
-    # Log per turn: heard, confidence, stage keys, and any slot values
-    app.logger.info({
-        "sid": call_sid, 
-        "stage": list(B.keys()), 
-        "heard": heard_raw, 
-        "confidence": confidence,
-        "values": {k: v for k, v in B.items() if k in ["datetime", "name", "phone", "email"]}
-    })
-    
     try:
+        # Enhanced logging per specification - log per turn
+        def log_turn(stage_info, next_prompt=None):
+            app.logger.info({
+                "sid": call_sid,
+                "stage": list(B.keys()),
+                "heard": heard_raw,
+                "confidence": confidence,
+                "next_prompt": next_prompt,
+                **stage_info
+            })
+        
         # Detect booking intent from phrases
         booking_keywords = ["book", "schedule", "appointment", "come in", "new patient", "back hurts", "pain", "visit"]
         if any(k in heard_raw.lower() for k in booking_keywords) or B.get("intent") == "booking":
@@ -377,23 +382,45 @@ def twilio_handoff():
 
             # === GOLD-STANDARD BOOKING FLOW ===
             
-            # 1) Date & time capture - NO AM/PM questions if already specified
+            # 1) Date & time capture with natural confirmation handling
             if "datetime" not in B:
                 
-                # A) "Yes" confirmation to proposed time
-                if said_yes(heard_raw) and B.get("candidate_dt"):
+                # A) Handle AM/PM clarification if awaiting
+                if B.get("awaiting_ampm") and B.get("candidate_dt"):
+                    cand = B["candidate_dt"]
+                    if said_morning(heard_raw):
+                        # Keep AM (no change needed if already AM)
+                        if cand.hour > 12:
+                            cand = cand.replace(hour=cand.hour - 12)
+                    elif said_afternoon(heard_raw):
+                        # Convert to PM
+                        if cand.hour < 12:
+                            cand = cand.replace(hour=cand.hour + 12)
+                    else:
+                        # Still unclear, ask again
+                        return respond_gather(base, "Did you mean morning or afternoon?")
+                    
+                    # Lock in the time and advance
+                    B["datetime"] = cand.isoformat()
+                    B["friendly_dt"] = cand.strftime("%A at %-I:%M %p")
+                    B["awaiting_ampm"] = False  # Clear immediately
+                    app.logger.info({"stage": "datetime_ampm_resolved", "heard": heard_raw, "datetime": B["datetime"]})
+                    return respond_gather(base, f"Great. What's your full name?")
+
+                # B) Natural confirmation to proposed time
+                if said_natural_confirmation(heard_raw) and B.get("candidate_dt"):
                     dt = B["candidate_dt"]
                     B["datetime"] = dt.isoformat()
                     B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
                     app.logger.info({"stage": "datetime_confirmed", "heard": heard_raw, "datetime": B["datetime"]})
                     return respond_gather(base, f"Great. What's your full name?")
 
-                # B) Parse new time utterance with normalization
+                # C) Parse new time utterance with normalization
                 dt, clar = parse_dt_central(heard_raw, B.get("last_context_dt"))
                 
                 # If clarification needed (only for truly ambiguous times)
-                if clar and not ("am" in heard_raw.lower() or "pm" in heard_raw.lower()):
-                    B["candidate_dt"] = B.get("last_context_dt")
+                if clar:
+                    B["candidate_dt"] = dt or B.get("last_context_dt")
                     B["awaiting_ampm"] = True
                     app.logger.info({"stage": "datetime_clarification", "heard": heard_raw, "clarification": clar})
                     return respond_gather(base, clar)
@@ -410,7 +437,7 @@ def twilio_handoff():
                 app.logger.info({"stage": "datetime_request", "heard": heard_raw})
                 return respond_gather(base, "What day and time works for you?")
 
-            # 2) Name capture - accept any non-empty utterance
+            # 2) Name capture - accept any non-empty utterance per specification
             elif "name" not in B:
                 cleaned = heard_raw.strip()
                 if cleaned:
@@ -421,18 +448,18 @@ def twilio_handoff():
                     app.logger.info({"stage": "name_empty", "heard": heard_raw})
                     return respond_gather(base, "I didn't catch your name. Could you say it again?")
 
-            # 3) Phone capture - extract 10+ digits
+            # 3) Phone capture - extract digits only per specification
             elif "phone" not in B:
                 digits = re.sub(r"\D", "", heard_raw)
                 if len(digits) >= 10:
                     B["phone"] = f"+1{digits[-10:]}"
                     app.logger.info({"stage": "phone_captured", "heard": heard_raw, "phone": B["phone"]})
-                    return respond_gather(base, "Got it. And what email should we send your confirmation to?")
+                    return respond_gather(base, "Thank you. What email should we use to send your confirmation?")
                 else:
                     app.logger.info({"stage": "phone_insufficient", "heard": heard_raw, "digits_found": len(digits)})
-                    return respond_gather(base, "Please say the 10-digit mobile number including area code.")
+                    return respond_gather(base, "Could you share your mobile number digit by digit, including area code?")
 
-            # 4) Email capture with normalization
+            # 4) Email capture with gold standard normalization
             elif "email" not in B:
                 # Normalize spoken email first
                 norm1 = normalize_spoken_email(heard_raw)
@@ -441,7 +468,7 @@ def twilio_handoff():
                     B["email"] = m.group(0)
                     app.logger.info({"stage": "email_captured", "heard": heard_raw, "normalized": norm1, "email": B["email"]})
                     
-                    # Proceed directly to booking
+                    # Proceed directly to booking per specification
                     payload = {"name": B["name"], "phone": B["phone"], "email": B["email"], "datetime": B["datetime"]}
                     try:
                         r = requests.post(f"{base}/book", json=payload, timeout=60)
@@ -449,13 +476,13 @@ def twilio_handoff():
                             app.logger.info({"stage": "booking_success", "payload": payload})
                             # Clear booking state after successful booking
                             CALLS[call_sid] = {"booking": {}}
-                            return respond_gather(base, f"Perfect. You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
+                            return respond_gather(base, f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}. Anything else I can help with?")
                         else:
                             app.logger.info({"stage": "booking_failed", "status_code": r.status_code, "payload": payload})
-                            return respond_gather(base, "I'm having trouble booking at the moment. Would you like a team member to call you back, or try a different time?")
+                            return respond_gather(base, "I'm having trouble booking right now. Would you like me to try a different time or have a team member call you?")
                     except Exception as booking_error:
                         app.logger.error({"stage": "booking_error", "error": str(booking_error), "payload": payload})
-                        return respond_gather(base, "I'm having trouble booking at the moment. Would you like a team member to call you back, or try a different time?")
+                        return respond_gather(base, "I'm having trouble booking right now. Would you like me to try a different time or have a team member call you?")
                 else:
                     app.logger.info({"stage": "email_invalid", "heard": heard_raw, "normalized": norm1})
                     return respond_gather(base, "Please say it like john at gmail dot com.")
