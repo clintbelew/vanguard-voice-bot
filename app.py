@@ -14,6 +14,8 @@ from twilio.twiml.voice_response import VoiceResponse, Gather
 import pytz
 from datetime import datetime
 import openai
+import dateparser
+from dateutil import parser as dateutil_parser
 
 # Load environment variables
 load_dotenv()
@@ -46,6 +48,44 @@ BUSINESS_LOCATION = os.getenv('BUSINESS_LOCATION', '123 Main Street, Suite 456, 
 BUSINESS_PHONE = os.getenv('BUSINESS_PHONE', '(830) 429-4111')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+
+# Central Time timezone for appointment parsing
+TZ = pytz.timezone("America/Chicago")
+
+def parse_datetime_central(text: str) -> tuple[datetime|None, str|None]:
+    """
+    Try to parse a natural-language appointment time in Central Time.
+    Returns (dt, clarifier) where:
+      - dt is a timezone-aware datetime if confident,
+      - clarifier is a question to disambiguate (e.g., AM/PM or day).
+    """
+    t = text.lower().strip()
+    
+    # If user only says "9 o'clock" or "9", ask AM/PM + day.
+    if t in {"9", "9 oclock", "9 o'clock", "nine", "nine oclock", "nine o'clock"}:
+        return None, "Did you mean 9 AM or 9 PM, and what day works for you?"
+
+    # Try parsing with dateparser
+    settings = {
+        "TIMEZONE": "America/Chicago",
+        "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",   # avoid past dates
+    }
+    dt = dateparser.parse(text, settings=settings)
+    if not dt:
+        return None, "What day and time works for you? For example, Monday at 9 AM."
+
+    # If no AM/PM and it's ambiguous, nudge to morning by default but confirm
+    # Detect: if hour in [1..11] and no 'am/pm' in text, ask confirm
+    if any(k in t for k in ["am","a.m.","pm","p.m."]):
+        # fine
+        pass
+    else:
+        if 1 <= dt.hour <= 11:
+            # Ask to confirm AM/PM
+            return None, f"Just to confirm, did you mean {dt.strftime('%-I %p on %A')}?"
+
+    return dt.astimezone(TZ), None
 
 # === ElevenLabs TTS ===
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY")
@@ -82,13 +122,17 @@ def tts_get():
         # Return a simple error response
         return Response(b"", mimetype="audio/mpeg", status=500)
 
-# === Simple session store (per call). For prod, use Redis. ===
-CALLS = {}  # { CallSid: {"history": [ {role, content} ], "booking": {...}} }
+# === Enhanced session store with booking state (per call). For prod, use Redis. ===
+CALLS = {}  # {CallSid: {"history": [{role, content}], "greeted": bool, "booking": {"name":..., "phone":..., "email":..., "datetime":...}}}
 
 def get_session(call_sid):
-    """Get or create session for a call."""
+    """Get or create enhanced session for a call with booking state."""
     if call_sid not in CALLS:
-        CALLS[call_sid] = {"history": []}
+        CALLS[call_sid] = {
+            "history": [],
+            "greeted": False,
+            "booking": {}
+        }
     return CALLS[call_sid]
 
 # === OpenAI ===
@@ -160,8 +204,12 @@ def twilio_entry():
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{greet_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto"
-          enhanced="true" speechModel="phone_call"
+  <Gather input="speech" 
+          language="en-US" 
+          speechTimeout="auto"
+          enhanced="true" 
+          speechModel="phone_call"
+          hints="nine am, 9 am, 9 p m, tomorrow, Monday morning, Tuesday afternoon, next week, September, October, appointment, book, schedule"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
@@ -173,10 +221,10 @@ def twilio_entry():
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Handle conversation in continuous loop with enhanced speech recognition."""
+    """Handle conversation in continuous loop with enhanced speech recognition and step-by-step booking."""
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", "NA")
-    heard = request.values.get("SpeechResult", "") or ""
+    heard = (request.values.get("SpeechResult") or "").strip()
     confidence = request.values.get("Confidence", "")
     
     # Enhanced logging with confidence scores
@@ -190,8 +238,10 @@ def twilio_handoff():
     
     logger.info(f"Twilio handoff - CallSid: {call_sid}, Speech: '{heard}', Confidence: {confidence}")
 
-    # Build conversation history with system prompt
+    # Get session with booking state
     session = get_session(call_sid)
+    
+    # Build conversation history with system prompt
     if not any(m["role"] == "system" for m in session["history"]):
         session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
     
@@ -199,13 +249,127 @@ def twilio_handoff():
     if heard:
         session["history"].append({"role": "user", "content": heard})
 
-    # Get assistant reply (wrap in try so we never stall)
-    try:
-        if heard:
-            # Process with OpenAI for natural conversation
+    # Detect booking intent cheaply (can also rely on LLM)
+    wants_booking = any(k in heard.lower() for k in ["book", "schedule", "appointment", "time", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "tomorrow", "next week", "am", "pm"])
+
+    # Handle booking flow with step-by-step collection
+    if wants_booking or session["booking"].get("intent") == "booking":
+        session["booking"]["intent"] = "booking"
+        
+        # Step 1: Collect datetime if missing
+        if "datetime" not in session["booking"]:
+            dt, clarifier = parse_datetime_central(heard)
+            if clarifier:
+                # Need clarification on the time
+                reply = clarifier
+            elif dt:
+                # Successfully parsed time, store it
+                session["booking"]["datetime"] = dt.isoformat()
+                reply = f"Perfect! I have you down for {dt.strftime('%-I:%M %p on %A, %B %-d')}. May I have your full name and a mobile number?"
+            else:
+                # Couldn't parse time, ask for it
+                reply = "What day and time would you like? For example, Monday at 9 AM or tomorrow morning at 10 AM."
+        
+        # Step 2: Collect name if we have datetime but missing name
+        elif "datetime" in session["booking"] and "name" not in session["booking"]:
+            # Simple name detection - look for capitalized words or common patterns
+            words = heard.split()
+            potential_name = ""
+            for i, word in enumerate(words):
+                if word.lower() in ["my", "name", "is", "i'm", "im", "this", "it's", "its"]:
+                    # Name likely follows these words
+                    if i + 1 < len(words):
+                        potential_name = " ".join(words[i+1:])
+                        break
+                elif word[0].isupper() and len(word) > 1:
+                    # Capitalized word might be a name
+                    potential_name = " ".join(words[i:])
+                    break
+            
+            if potential_name and len(potential_name.split()) >= 1:
+                session["booking"]["name"] = potential_name.strip()
+                reply = f"Thank you, {potential_name}. Could I get your mobile phone number?"
+            else:
+                reply = "Could I get your full name for the appointment?"
+        
+        # Step 3: Collect phone if we have datetime and name but missing phone
+        elif "datetime" in session["booking"] and "name" in session["booking"] and "phone" not in session["booking"]:
+            # Simple phone detection - look for numbers
+            import re
+            phone_match = re.search(r'[\d\s\-\(\)\.]{10,}', heard)
+            if phone_match:
+                phone = re.sub(r'[^\d]', '', phone_match.group())
+                if len(phone) >= 10:
+                    # Format phone number
+                    if len(phone) == 10:
+                        formatted_phone = f"+1{phone}"
+                    elif len(phone) == 11 and phone.startswith('1'):
+                        formatted_phone = f"+{phone}"
+                    else:
+                        formatted_phone = f"+1{phone[-10:]}"
+                    
+                    session["booking"]["phone"] = formatted_phone
+                    reply = "Great! And what's your email address?"
+                else:
+                    reply = "Could you repeat your phone number? I need all 10 digits."
+            else:
+                reply = "Could I get your mobile phone number for the appointment?"
+        
+        # Step 4: Collect email if we have everything else
+        elif "datetime" in session["booking"] and "name" in session["booking"] and "phone" in session["booking"] and "email" not in session["booking"]:
+            # Simple email detection
+            import re
+            email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', heard)
+            if email_match:
+                session["booking"]["email"] = email_match.group()
+                # We have everything, try to book!
+                try:
+                    ok, msg = try_booking(
+                        name=session["booking"]["name"],
+                        phone=session["booking"]["phone"],
+                        email=session["booking"]["email"],
+                        datetime_iso=session["booking"]["datetime"]
+                    )
+                    if ok:
+                        # Clear booking state after successful booking
+                        session["booking"] = {}
+                        reply = f"{msg} Is there anything else I can help you with today?"
+                    else:
+                        reply = f"{msg} Would you like to try a different time?"
+                except Exception as e:
+                    logger.error(f"Booking error: {str(e)}")
+                    reply = "I had trouble completing the booking. Let me connect you with someone who can help."
+            else:
+                reply = "What's your email address for the appointment confirmation?"
+        
+        # Step 5: All info collected, this shouldn't happen but handle gracefully
+        else:
+            reply = "I have all your information. Let me book that appointment for you."
+            try:
+                ok, msg = try_booking(
+                    name=session["booking"].get("name", ""),
+                    phone=session["booking"].get("phone", ""),
+                    email=session["booking"].get("email", ""),
+                    datetime_iso=session["booking"].get("datetime", "")
+                )
+                if ok:
+                    session["booking"] = {}
+                    reply = f"{msg} Is there anything else I can help you with?"
+                else:
+                    reply = f"{msg} Would you like to try a different time?"
+            except Exception as e:
+                logger.error(f"Booking error: {str(e)}")
+                reply = "I had trouble completing the booking. Let me connect you with someone who can help."
+
+        # Return TwiML for booking flow with appropriate hints
+        hints = "John, Jane, Smith, Johnson, at nine am, tomorrow, Monday at 9 AM, phone number, email, gmail, yahoo, hotmail"
+        
+    else:
+        # Regular conversation flow (not booking)
+        try:
             reply = openai_chat(session["history"])
             
-            # Check for booking intent using BOOK: convention
+            # Check for booking intent using BOOK: convention from OpenAI
             if reply.strip().startswith("BOOK:"):
                 try:
                     data_json = reply.split("BOOK:", 1)[1].strip()
@@ -220,28 +384,32 @@ def twilio_handoff():
                 except Exception as e:
                     logger.error(f"Booking parsing error: {str(e)}")
                     reply = "I had trouble booking that. Could I confirm your full name, mobile number, email, and a good time?"
-        else:
-            # No speech detected
-            reply = "I didn't catch that. Could you please repeat what you'd like help with?"
-            
-    except Exception as e:
-        app.logger.error(f"OpenAI error: {e}")
-        reply = "I can help with hours, our location, or I can book an appointment. What would you like to do?"
+                    
+        except Exception as e:
+            app.logger.error(f"OpenAI error: {e}")
+            reply = "I can help with hours, our location, or I can book an appointment. What would you like to do?"
+        
+        # Regular conversation hints
+        hints = "nine am, 9 am, 9 p m, tomorrow, Monday morning, Tuesday afternoon, next week, September, October, appointment, book, schedule"
 
     # Add assistant reply to conversation history
     session["history"].append({"role": "assistant", "content": reply})
     
     logger.info(f"Generated reply: {reply}")
+    logger.info(f"Booking state: {session['booking']}")
     
     reply_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
 
-    # IMPORTANT: Keep the conversation going with a new Gather in the same response
-    # This prevents bouncing back to /twilio and re-greeting
+    # Keep the conversation going with enhanced Gather
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{reply_url}</Play>
-  <Gather input="speech" language="en-US" speechTimeout="auto"
-          enhanced="true" speechModel="phone_call"
+  <Gather input="speech" 
+          language="en-US" 
+          speechTimeout="auto"
+          enhanced="true" 
+          speechModel="phone_call"
+          hints="{hints}"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
