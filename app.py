@@ -32,47 +32,60 @@ app = Flask(__name__)
 TZ = pytz.timezone("America/Chicago")
 DOW = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
 
-def normalize_uttr(t: str) -> str:
-    """Normalize user utterance for better datetime parsing."""
-    t = t.lower().strip()
-    t = t.replace("o'clock", " o clock ")
-    t = re.sub(r"\bten in the morning\b", "10 am", t)
-    t = re.sub(r"\b(\d+)\s*in the morning\b", r"\1 am", t)
-    t = re.sub(r"\b(\d+)\s*in the evening\b", r"\1 pm", t)
-    return re.sub(r"\s+", " ", t)
+# === Enhanced booking flow constants ===
+AFFIRM = ["yes","yeah","yep","that works","sounds good","okay","ok","sure","perfect","great"]
 
-def parse_dt_central(text: str) -> tuple[datetime|None, str|None]:
+def norm(text: str) -> str:
+    """Normalize text for consistent processing."""
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+def parse_dt_central_enhanced(user_text: str, prior_dt: datetime = None) -> tuple[datetime, str]:
     """
-    Parse natural language datetime for America/Chicago timezone.
-    Returns (datetime, None) if successful, (None, clarifier_question) if needs clarification.
+    Enhanced datetime parser with prior context support.
+    Returns (dt: aware datetime | None, clarify: str | None)
     """
-    t = normalize_uttr(text)
+    t = norm(user_text)
+    t = t.replace("o'clock", " o clock ")
+    # Quick normalize "ten in the morning" -> 10 am
+    t = re.sub(r"\b(\d{1,2})\s+in the (morning|evening|afternoon)\b",
+               lambda m: f"{m.group(1)} {'am' if m.group(2)=='morning' else 'pm'}", t)
+
     settings = {
         "TIMEZONE": "America/Chicago",
         "RETURN_AS_TIMEZONE_AWARE": True,
         "PREFER_DATES_FROM": "future",
     }
-    
-    # Common fast path: "tuesday at 10 am"
-    if any(d in t for d in DOW) and re.search(r"\b(\d{1,2})(:\d{2})?\s*(am|pm)\b", t):
-        dt = dateparser.parse(t, settings=settings)
-        if dt: 
-            return dt.astimezone(TZ), None
-
-    # If only day-of-week + hour (no am/pm): ask to clarify
-    if any(d in t for d in DOW) and re.search(r"\b(\d{1,2})(:\d{2})?\b", t) and not re.search(r"\bam|pm\b", t):
-        return None, "Did you mean A M or P M for that time?"
-
-    # Generic parse
     dt = dateparser.parse(t, settings=settings)
+
+    # If only a bare hour (10) w/ no am/pm and no DOW, ask to clarify
+    if dt and (1 <= dt.hour <= 11) and ("am" not in t and "pm" not in t):
+        return None, "Just to confirm, did you mean that in the morning or the afternoon?"
+
     if not dt:
+        # If we had a prior day (from a suggestion), and caller only said a time like "10 am"
+        if prior_dt and re.search(r"\b(\d{1,2})(:\d{2})?\s*(am|pm)\b", t):
+            hhmm = re.search(r"\b(\d{1,2})(:\d{2})?\s*(am|pm)\b", t).group(0)
+            merged = dateparser.parse(
+                prior_dt.strftime("%A ") + hhmm, settings=settings
+            )
+            if merged:
+                return merged.astimezone(TZ), None
         return None, "What day and time works for you? For example, Tuesday at 10 A M."
-    
-    # If still ambiguous morning/evening for 1-11 and no am/pm present
-    if (1 <= dt.hour <= 11) and ("am" not in t and "pm" not in t):
-        return None, f"Just to confirm, did you mean {dt.strftime('%A at %-I A M')} or {dt.strftime('%-I P M')}?"
-    
+
     return dt.astimezone(TZ), None
+
+def gather_block(base, prompt_text):
+    """Return TwiML that speaks prompt_text and immediately keeps mic open."""
+    return f"""
+<Play>{base}/tts?text={urllib.parse.quote_plus(prompt_text)}</Play>
+<Gather input="speech" language="en-US" speechTimeout="auto"
+        enhanced="true" speechModel="phone_call"
+        hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule,name,phone,email"
+        action="/twilio-handoff" method="POST">
+  <Pause length="1"/>
+</Gather>
+<Redirect>/twilio</Redirect>
+"""
 
 # Environment variables
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
@@ -432,126 +445,157 @@ def try_booking(name, phone, email, datetime_iso):
         return False, "I had trouble booking just now. Would you like me to connect you to a team member?"
 
 # === Twilio flow ===
-@app.route("/twilio", methods=["GET", "POST"])
+@app.route("/twilio", methods=["GET","POST"])
 def twilio_entry():
-    """Main Twilio entry point with one-time greeting and enhanced speech gathering."""
+    """Enhanced Twilio entry point with improved greeting logic."""
     base = request.url_root.rstrip("/")
-    call_sid = request.values.get("CallSid", "NA")
+    call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
     session = get_session(call_sid)
-    
-    # Check if this is the first time we're greeting this caller
-    first_time = not session.get("greeted")
-    session["greeted"] = True
-    
-    logger.info(f"Twilio entry called - CallSid: {call_sid}, First time: {first_time}")
 
-    # Use full greeting only on first call, shorter prompt on subsequent loops
-    greeting = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
-    greet_text = greeting if first_time else "How can I help you?"
-    greet_url = f"{base}/tts?text={urllib.parse.quote_plus(greet_text)}"
-
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+    if not session.get("greeted"):
+        session["greeted"] = True
+        greet = request.values.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>{greet_url}</Play>
-  <Gather input="speech"
-          language="en-US"
-          speechTimeout="auto"
-          enhanced="true"
-          speechModel="phone_call"
-          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
-          action="/twilio-handoff" method="POST">
-    <Pause length="1"/>
-  </Gather>
-  <Redirect>/twilio</Redirect>
+  {gather_block(base, greet)}
 </Response>"""
-    
-    logger.info(f"Generated TwiML: {twiml}")
-    return Response(twiml, mimetype="text/xml")
+        return Response(twiml, mimetype="text/xml")
+    else:
+        # Brief reprompt without re-greeting
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  {gather_block(base, "How else can I help you?")}
+</Response>"""
+        return Response(twiml, mimetype="text/xml")
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Handle conversation with comprehensive error handling - ALWAYS returns valid TwiML."""
+    """Enhanced conversation handler with step-by-step booking flow."""
     base = request.url_root.rstrip("/")
-    call_sid = request.values.get("CallSid", "NA")
-    heard = (request.values.get("SpeechResult") or "").strip()
+    call_sid = request.values.get("CallSid", f"NA-{int(time.time())}")
+    heard_raw = request.values.get("SpeechResult", "") or ""
+    heard = norm(heard_raw)
     
     # Enhanced logging to see exactly what Twilio heard
-    app.logger.info({"call": call_sid, "heard": heard})
+    app.logger.info({"call": call_sid, "heard": heard_raw})
     
     try:
-        # Get session and ensure system prompt
         session = get_session(call_sid)
-        if not any(m["role"] == "system" for m in session["history"]):
-            session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-        
-        # Add user input to conversation history
-        if heard:
-            session["history"].append({"role": "user", "content": heard})
-        
-        # Generate reply with booking state confirmation flow
         B = session.setdefault("booking", {})
-        
-        if heard:
-            # Check for booking intent
-            if ("book" in heard.lower() or "appointment" in heard.lower() or B.get("intent") == "booking"):
-                B["intent"] = "booking"
-                
-                if "datetime" not in B:
-                    # Try to parse datetime from user input
-                    dt, clar = parse_dt_central(heard)
-                    if clar:
-                        # Need clarification
-                        reply = clar
-                    elif dt:
-                        # Successfully parsed datetime
-                        B["datetime"] = dt.isoformat()
-                        reply = dt.strftime("Great — %A at %-I:%M %p. What is your full name?")
+
+        # --- Booking state machine ---
+        # Detect/keep intent
+        if any(k in heard for k in ["book","schedule","appointment"]) or B.get("intent") == "booking":
+            B["intent"] = "booking"
+
+            # 1) datetime
+            if "datetime" not in B:
+                # Affirmation to last suggestion?
+                if any(a in heard for a in AFFIRM) and B.get("last_suggested_dt"):
+                    B["datetime"] = B["last_suggested_dt"]
+                    reply = f"Great — {B['friendly_dt']}. What's your full name?"
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                    return Response(twiml, mimetype="text/xml")
+
+                prior_dt = None
+                if B.get("last_suggested_dt_obj"):
+                    prior_dt = B["last_suggested_dt_obj"]
+
+                dt, clar = parse_dt_central_enhanced(heard_raw, prior_dt)
+                if clar:
+                    reply = clar
+                elif dt:
+                    # Save dt and friendly string
+                    B["datetime"] = dt.isoformat()
+                    B["friendly_dt"] = dt.strftime("%A at %-I:%M %p")
+                    reply = f"Great — {B['friendly_dt']}. What's your full name?"
+                else:
+                    reply = "What day and time works for you? For example, Tuesday at 10 A M."
+
+                # Remember last suggestion if we gave one
+                if "friendly_dt" in B:
+                    B["last_suggested_dt"] = B["datetime"]
+                    B["last_suggested_dt_obj"] = dt
+
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                return Response(twiml, mimetype="text/xml")
+
+            # 2) name
+            if "name" not in B:
+                # Naive extract: look for "my name is …"
+                m = re.search(r"(my name is|this is)\s+([a-zA-Z][a-zA-Z ,.'-]+)$", heard_raw, re.I)
+                if m:
+                    B["name"] = m.group(2).strip()
+                    reply = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
+                else:
+                    # Look for capitalized words that might be names
+                    words = heard_raw.split()
+                    potential_name = ""
+                    for i, word in enumerate(words):
+                        if word and word[0].isupper() and len(word) > 1:
+                            potential_name = " ".join(words[i:])
+                            break
+                    
+                    if potential_name and len(potential_name.split()) >= 1:
+                        B["name"] = potential_name.strip()
+                        reply = "Thanks. What's the best mobile number for confirmation? Please say it digit by digit."
                     else:
-                        # Couldn't parse datetime
-                        reply = "What day and time works for you? For example, Tuesday at 10 A M."
+                        reply = "Got it. May I have your full name?"
+                
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                return Response(twiml, mimetype="text/xml")
+
+            # 3) phone
+            if "phone" not in B:
+                digits = re.sub(r"\D", "", heard_raw)
+                if len(digits) >= 10:
+                    B["phone"] = f"+1{digits[-10:]}"
+                    reply = "Thank you. What email should we use to send your confirmation?"
                 else:
-                    # Already have datetime, collect other info
-                    reply = "Thanks. Please tell me your full name, mobile number, and email so I can confirm the booking."
-            else:
-                # Not booking intent - try chiropractic responses first
-                chiro_response = match_chiropractic_response(heard)
-                if chiro_response:
-                    reply = chiro_response
-                    logger.info(f"Using chiropractic response: {reply}")
+                    reply = "Could you share your mobile number digit by digit, including area code?"
+                twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                return Response(twiml, mimetype="text/xml")
+
+            # 4) email
+            if "email" not in B:
+                m = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", heard_raw, re.I)
+                if m:
+                    B["email"] = m.group(0)
+                    # Attempt booking
+                    payload = {
+                        "name": B["name"],
+                        "phone": B["phone"],
+                        "email": B["email"],
+                        "datetime": B["datetime"],
+                    }
+                    try:
+                        r = requests.post(f"{base}/book", json=payload, timeout=60)
+                        if r.status_code == 200:
+                            reply = f"You're all set for {B['friendly_dt']}. We'll text your confirmation to {B['phone']}."
+                            # Clear booking state after successful booking
+                            session["booking"] = {}
+                        else:
+                            reply = "I couldn't complete the booking just now. Would you like me to try a different time?"
+                    except Exception as e:
+                        logger.error(f"Booking error: {str(e)}")
+                        reply = "I had trouble booking just now. Would you like me to connect you to a team member?"
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                    return Response(twiml, mimetype="text/xml")
                 else:
-                    # Use OpenAI for natural conversation
-                    reply = openai_chat(session["history"])
+                    reply = "Please spell your email address clearly."
+                    twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
+                    return Response(twiml, mimetype="text/xml")
+
+        # --- Non-booking conversation: try chiropractic responses first ---
+        chiro_response = match_chiropractic_response(heard_raw)
+        if chiro_response:
+            reply = chiro_response
+            logger.info(f"Using chiropractic response: {reply}")
         else:
-            # No speech detected
-            reply = CHIROPRACTIC_RESPONSES["fallbacks"]["no_speech"]
+            # Fallback for general conversation
+            reply = "I can help with hours, location, services, or I can book an appointment. What would you like?"
         
-        # Add assistant reply to conversation history (for non-booking conversations)
-        if B.get("intent") != "booking":
-            session["history"].append({"role": "assistant", "content": reply})
-        
-        logger.info(f"Generated reply: {reply}")
-        logger.info(f"Booking state: {B}")
-        
-        # Generate TTS URL
-        tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
-        
-        # Return TwiML with enhanced Gather (mic stays hot)
-        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>{tts_url}</Play>
-  <Gather input="speech"
-          language="en-US"
-          speechTimeout="auto"
-          enhanced="true"
-          speechModel="phone_call"
-          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
-          action="/twilio-handoff" method="POST">
-    <Pause length="1"/>
-  </Gather>
-  <Redirect>/twilio</Redirect>
-</Response>"""
-        
-        logger.info(f"Generated TwiML successfully for call {call_sid}")
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, reply)}</Response>"""
         return Response(twiml, mimetype="text/xml")
         
     except Exception as e:
@@ -559,25 +603,10 @@ def twilio_handoff():
         
         # SAFE fallback TwiML (keeps call alive, no crash)
         fallback = "I had a little trouble just then. Could you say that one more time, like Monday at 9 A M?"
-        tts_url = f"{base}/tts?text={urllib.parse.quote_plus(fallback)}"
-        
-        fallback_twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>{tts_url}</Play>
-  <Gather input="speech"
-          language="en-US"
-          speechTimeout="auto"
-          enhanced="true"
-          speechModel="phone_call"
-          hints="monday,tuesday,wednesday,thursday,friday,saturday,sunday,9 am,10 am,11 am,1 pm,2 pm,3 pm,tomorrow,next week,appointment,book,schedule"
-          action="/twilio-handoff" method="POST">
-    <Pause length="1"/>
-  </Gather>
-  <Redirect>/twilio</Redirect>
-</Response>"""
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?><Response>{gather_block(base, fallback)}</Response>"""
         
         logger.info(f"Using fallback TwiML for call {call_sid}")
-        return Response(fallback_twiml, mimetype="text/xml")
+        return Response(twiml, mimetype="text/xml")
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
