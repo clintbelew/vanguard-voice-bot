@@ -13,9 +13,9 @@ from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Gather
 import pytz
 from datetime import datetime
-import openai
 import dateparser
 from dateutil import parser as dateutil_parser
+import openai
 
 # Load environment variables
 load_dotenv()
@@ -242,17 +242,78 @@ def tts_bytes(text: str) -> bytes:
 # TTS endpoint for Twilio
 @app.route("/tts", methods=["GET"])
 def tts_get():
-    """Generate TTS audio using ElevenLabs for Twilio."""
-    text = request.args.get("text", "Thanks for calling Vanguard Chiropractic. How can I help you today?")
-    logger.info(f"TTS endpoint called with text: {text}")
+    """Resilient TTS endpoint - ALWAYS returns valid audio."""
+    text = request.args.get("text", "Thanks for calling Vanguard. How can I help you today?")
     
     try:
-        audio_bytes = tts_bytes(text)
-        return Response(audio_bytes, mimetype="audio/mpeg")
+        # Try ElevenLabs TTS with retry logic
+        audio = tts_bytes_with_retry(text)
+        logger.info(f"ElevenLabs TTS successful for text: {text[:50]}...")
+        return Response(audio, mimetype="audio/mpeg")
+        
     except Exception as e:
-        logger.error(f"Error generating TTS: {str(e)}")
-        # Return a simple error response
-        return Response(b"", mimetype="audio/mpeg", status=500)
+        app.logger.error(f"/tts error: {e}", exc_info=True)
+        logger.error(f"TTS failed for text: {text[:50]}..., using fallback audio")
+        
+        # Return fallback audio file so Twilio doesn't get 5xx
+        try:
+            return send_file("static/fallback.mp3", mimetype="audio/mpeg")
+        except Exception as fallback_error:
+            app.logger.error(f"Fallback audio error: {fallback_error}", exc_info=True)
+            # Last resort: return empty audio response
+            return Response(b"", mimetype="audio/mpeg", status=200)
+
+def tts_bytes_with_retry(text: str, max_retries: int = 2) -> bytes:
+    """
+    Generate TTS audio with retry logic for resilience.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                ELEVEN_URL,
+                headers={
+                    "xi-api-key": ELEVEN_KEY,
+                    "Accept": "audio/mpeg",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "text": text,
+                    "model_id": "eleven_multilingual_v2",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.8
+                    }
+                },
+                timeout=10  # Shorter timeout for faster fallback
+            )
+            
+            # Check for successful response
+            if response.status_code == 200:
+                return response.content
+            elif response.status_code >= 500 and attempt < max_retries - 1:
+                # Retry on 5xx errors
+                logger.warning(f"ElevenLabs 5xx error (attempt {attempt + 1}), retrying...")
+                time.sleep(0.5)  # Brief delay before retry
+                continue
+            else:
+                # Don't retry on 4xx errors or final attempt
+                response.raise_for_status()
+                
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                logger.warning(f"ElevenLabs timeout (attempt {attempt + 1}), retrying...")
+                continue
+            else:
+                raise
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"ElevenLabs request error (attempt {attempt + 1}): {e}, retrying...")
+                continue
+            else:
+                raise
+    
+    # If we get here, all retries failed
+    raise Exception("All TTS retry attempts failed")
 
 # === Enhanced session store with booking state (per call). For prod, use Redis. ===
 CALLS = {}  # {CallSid: {"history": [{role, content}], "greeted": bool, "booking": {"name":..., "phone":..., "email":..., "datetime":...}}}
@@ -336,12 +397,9 @@ def twilio_entry():
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Play>{greet_url}</Play>
-  <Gather input="speech" 
-          language="en-US" 
-          speechTimeout="auto"
-          enhanced="true" 
-          speechModel="phone_call"
-          hints="nine am, 9 am, 9 p m, tomorrow, Monday morning, Tuesday afternoon, next week, September, October, appointment, book, schedule"
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call"
+          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
@@ -353,224 +411,80 @@ def twilio_entry():
 
 @app.route("/twilio-handoff", methods=["POST"])
 def twilio_handoff():
-    """Handle conversation in continuous loop with enhanced speech recognition and step-by-step booking."""
+    """Handle conversation with comprehensive error handling - ALWAYS returns valid TwiML."""
     base = request.url_root.rstrip("/")
     call_sid = request.values.get("CallSid", "NA")
     heard = (request.values.get("SpeechResult") or "").strip()
-    confidence = request.values.get("Confidence", "")
     
-    # Enhanced logging with confidence scores
-    app.logger.info({
-        "call": call_sid, 
-        "heard": heard, 
-        "confidence": confidence,
-        "form_data": dict(request.form),
-        "all_values": dict(request.values)
-    })
+    app.logger.info({"call": call_sid, "heard": heard})
     
-    logger.info(f"Twilio handoff - CallSid: {call_sid}, Speech: '{heard}', Confidence: {confidence}")
-
-    # Get session with booking state
-    session = get_session(call_sid)
-    
-    # Build conversation history with system prompt
-    if not any(m["role"] == "system" for m in session["history"]):
-        session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
-    
-    # Add user input to conversation history
-    if heard:
-        session["history"].append({"role": "user", "content": heard})
-
-    # Detect booking intent cheaply (can also rely on LLM)
-    wants_booking = any(k in heard.lower() for k in ["book", "schedule", "appointment", "time", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "tomorrow", "next week", "am", "pm"]) if heard else False
-
-    # Handle case where no speech was detected
-    if not heard:
-        reply = CHIROPRACTIC_RESPONSES["fallbacks"]["no_speech"]
-        logger.info("No speech detected, using chiropractic fallback")
-    
-    # First, try to match against chiropractic-specific responses
-    elif chiro_response := match_chiropractic_response(heard):
-        # Use chiropractic-specific response and check if it triggers booking
-        reply = chiro_response
+    try:
+        # Get session and ensure system prompt
+        session = get_session(call_sid)
+        if not any(m["role"] == "system" for m in session["history"]):
+            session["history"].insert(0, {"role": "system", "content": SYSTEM_PROMPT})
         
-        # Check if the chiropractic response indicates booking intent
-        booking_triggers = ["what day", "time work", "schedule", "book", "reserve", "appointment"]
-        if any(trigger in reply.lower() for trigger in booking_triggers):
-            session["booking"]["intent"] = "booking"
+        # Add user input to conversation history
+        if heard:
+            session["history"].append({"role": "user", "content": heard})
         
-        logger.info(f"Using chiropractic response: {reply}")
-        
-    # Handle booking flow with step-by-step collection
-    elif wants_booking or session["booking"].get("intent") == "booking":
-        session["booking"]["intent"] = "booking"
-        
-        # Step 1: Collect datetime if missing
-        if "datetime" not in session["booking"]:
-            dt, clarifier = parse_datetime_central(heard)
-            if clarifier:
-                # Need clarification on the time - use chiropractic fallback if appropriate
-                if "9 AM or 9 PM" in clarifier:
-                    reply = CHIROPRACTIC_RESPONSES["fallbacks"]["clarify_time"]
-                else:
-                    reply = clarifier
-            elif dt:
-                # Successfully parsed time, store it
-                session["booking"]["datetime"] = dt.isoformat()
-                reply = f"Perfect! I have you down for {dt.strftime('%-I:%M %p on %A, %B %-d')}. May I have your full name and a mobile number?"
+        # Generate reply with fallback
+        if heard:
+            # Try chiropractic responses first
+            chiro_response = match_chiropractic_response(heard)
+            if chiro_response:
+                reply = chiro_response
+                logger.info(f"Using chiropractic response: {reply}")
             else:
-                # Couldn't parse time, ask for it
-                reply = "What day and time would you like? For example, Monday at 9 AM or tomorrow morning at 10 AM."
-        
-        # Step 2: Collect name if we have datetime but missing name
-        elif "datetime" in session["booking"] and "name" not in session["booking"]:
-            # Simple name detection - look for capitalized words or common patterns
-            words = heard.split()
-            potential_name = ""
-            for i, word in enumerate(words):
-                if word.lower() in ["my", "name", "is", "i'm", "im", "this", "it's", "its"]:
-                    # Name likely follows these words
-                    if i + 1 < len(words):
-                        potential_name = " ".join(words[i+1:])
-                        break
-                elif word[0].isupper() and len(word) > 1:
-                    # Capitalized word might be a name
-                    potential_name = " ".join(words[i:])
-                    break
-            
-            if potential_name and len(potential_name.split()) >= 1:
-                session["booking"]["name"] = potential_name.strip()
-                reply = f"Thank you, {potential_name}. Could I get your mobile phone number?"
-            else:
-                reply = "Could I get your full name for the appointment?"
-        
-        # Step 3: Collect phone if we have datetime and name but missing phone
-        elif "datetime" in session["booking"] and "name" in session["booking"] and "phone" not in session["booking"]:
-            # Simple phone detection - look for numbers
-            import re
-            phone_match = re.search(r'[\d\s\-\(\)\.]{10,}', heard)
-            if phone_match:
-                phone = re.sub(r'[^\d]', '', phone_match.group())
-                if len(phone) >= 10:
-                    # Format phone number
-                    if len(phone) == 10:
-                        formatted_phone = f"+1{phone}"
-                    elif len(phone) == 11 and phone.startswith('1'):
-                        formatted_phone = f"+{phone}"
-                    else:
-                        formatted_phone = f"+1{phone[-10:]}"
-                    
-                    session["booking"]["phone"] = formatted_phone
-                    reply = "Great! And what's your email address?"
-                else:
-                    reply = "Could you repeat your phone number? I need all 10 digits."
-            else:
-                reply = "Could I get your mobile phone number for the appointment?"
-        
-        # Step 4: Collect email if we have everything else
-        elif "datetime" in session["booking"] and "name" in session["booking"] and "phone" in session["booking"] and "email" not in session["booking"]:
-            # Simple email detection
-            import re
-            email_match = re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', heard)
-            if email_match:
-                session["booking"]["email"] = email_match.group()
-                # We have everything, try to book!
-                try:
-                    ok, msg = try_booking(
-                        name=session["booking"]["name"],
-                        phone=session["booking"]["phone"],
-                        email=session["booking"]["email"],
-                        datetime_iso=session["booking"]["datetime"]
-                    )
-                    if ok:
-                        # Clear booking state after successful booking
-                        session["booking"] = {}
-                        reply = f"{msg} Is there anything else I can help you with today?"
-                    else:
-                        reply = f"{msg} Would you like to try a different time?"
-                except Exception as e:
-                    logger.error(f"Booking error: {str(e)}")
-                    reply = "I had trouble completing the booking. Let me connect you with someone who can help."
-            else:
-                reply = "What's your email address for the appointment confirmation?"
-        
-        # Step 5: All info collected, this shouldn't happen but handle gracefully
+                # Use OpenAI for natural conversation
+                reply = openai_chat(session["history"])
         else:
-            reply = "I have all your information. Let me book that appointment for you."
-            try:
-                ok, msg = try_booking(
-                    name=session["booking"].get("name", ""),
-                    phone=session["booking"].get("phone", ""),
-                    email=session["booking"].get("email", ""),
-                    datetime_iso=session["booking"].get("datetime", "")
-                )
-                if ok:
-                    session["booking"] = {}
-                    reply = f"{msg} Is there anything else I can help you with?"
-                else:
-                    reply = f"{msg} Would you like to try a different time?"
-            except Exception as e:
-                logger.error(f"Booking error: {str(e)}")
-                reply = "I had trouble completing the booking. Let me connect you with someone who can help."
-
-        # Return TwiML for booking flow with appropriate hints
-        hints = "John, Jane, Smith, Johnson, at nine am, tomorrow, Monday at 9 AM, phone number, email, gmail, yahoo, hotmail"
+            # No speech detected
+            reply = CHIROPRACTIC_RESPONSES["fallbacks"]["no_speech"]
         
-    else:
-        # Regular conversation flow (not booking)
-        try:
-            reply = openai_chat(session["history"])
-            
-            # Check for booking intent using BOOK: convention from OpenAI
-            if reply.strip().startswith("BOOK:"):
-                try:
-                    data_json = reply.split("BOOK:", 1)[1].strip()
-                    data = json.loads(data_json)
-                    ok, msg = try_booking(
-                        name=data.get("name",""),
-                        phone=data.get("phone",""),
-                        email=data.get("email",""),
-                        datetime_iso=data.get("datetime",""),
-                    )
-                    reply = msg
-                except Exception as e:
-                    logger.error(f"Booking parsing error: {str(e)}")
-                    reply = "I had trouble booking that. Could I confirm your full name, mobile number, email, and a good time?"
-                    
-        except Exception as e:
-            app.logger.error(f"OpenAI error: {e}")
-            reply = "I can help with hours, our location, or I can book an appointment. What would you like to do?"
+        # Add assistant reply to history
+        session["history"].append({"role": "assistant", "content": reply})
         
-        # Regular conversation hints
-        hints = "nine am, 9 am, 9 p m, tomorrow, Monday morning, Tuesday afternoon, next week, September, October, appointment, book, schedule"
-
-    # Add assistant reply to conversation history
-    session["history"].append({"role": "assistant", "content": reply})
-    
-    logger.info(f"Generated reply: {reply}")
-    logger.info(f"Booking state: {session['booking']}")
-    
-    reply_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
-
-    # Keep the conversation going with enhanced Gather
-    twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+        # Generate TTS URL
+        tts_url = f"{base}/tts?text={urllib.parse.quote_plus(reply)}"
+        
+        # Return TwiML with enhanced Gather (mic stays hot)
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Play>{reply_url}</Play>
-  <Gather input="speech" 
-          language="en-US" 
-          speechTimeout="auto"
-          enhanced="true" 
-          speechModel="phone_call"
-          hints="{hints}"
+  <Play>{tts_url}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call"
+          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
           action="/twilio-handoff" method="POST">
     <Pause length="1"/>
   </Gather>
-  <!-- Fallback only if silence -->
   <Redirect>/twilio</Redirect>
 </Response>"""
-    
-    logger.info(f"Generated TwiML: {twiml}")
-    return Response(twiml, mimetype="text/xml")
+        
+        logger.info(f"Generated TwiML successfully for call {call_sid}")
+        return Response(twiml, mimetype="text/xml")
+        
+    except Exception as e:
+        app.logger.error(f"/twilio-handoff error: {e}", exc_info=True)
+        
+        # SAFE fallback TwiML (keeps call alive, no crash)
+        fallback = "I had a little trouble just then. Could you say that one more time, like Monday at 9 A M?"
+        tts_url = f"{base}/tts?text={urllib.parse.quote_plus(fallback)}"
+        
+        fallback_twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Play>{tts_url}</Play>
+  <Gather input="speech" language="en-US" speechTimeout="auto"
+          enhanced="true" speechModel="phone_call"
+          hints="book, schedule, appointment, monday, tuesday, 9 am, 3 pm, tomorrow, next week"
+          action="/twilio-handoff" method="POST">
+    <Pause length="1"/>
+  </Gather>
+  <Redirect>/twilio</Redirect>
+</Response>"""
+        
+        logger.info(f"Using fallback TwiML for call {call_sid}")
+        return Response(fallback_twiml, mimetype="text/xml")
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
